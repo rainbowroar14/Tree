@@ -1,0 +1,55 @@
+ASSET CREDITS
+=============
+
+DOWNLOADED (real photo textures, cut into individual transparent PNGs)
+---------------------------------------------------------------------
+assets/sticks/stick_dl_1..6.png
+  Source: ambientCG "StickSet001" (2K PNG: Color + Opacity maps), by Lennart Demes
+  URL:    https://ambientcg.com/view?id=StickSet001  (download: https://ambientcg.com/get?file=StickSet001_2K-PNG.zip)
+  Also mirrored on Wikimedia Commons: https://commons.wikimedia.org/wiki/File:StickSet001_6K_Color.png
+  License: CC0 1.0 Public Domain (https://creativecommons.org/publicdomain/zero/1.0/)
+
+assets/leaves/leaf_dl_1..6.png
+  Source: ambientCG "LeafSet001" (2K PNG: Color + Opacity maps), by Lennart Demes
+  URL:    https://ambientcg.com/view?id=LeafSet001
+  License: CC0 1.0 Public Domain
+
+assets/leaves/leaf_dl_7..12.png
+  Source: ambientCG "LeafSet004" (2K PNG: Color + Opacity maps), by Lennart Demes
+  URL:    https://ambientcg.com/view?id=LeafSet004
+  License: CC0 1.0 Public Domain
+
+assets/dirt/dirt_dl_ground048.jpg   (soil texture, resized to 384px tile)
+assets/dirt/clod_dl_1..4.png        (soil crumbs: irregular pieces cut out of the same texture)
+  Source: ambientCG "Ground048" (1K JPG Color map), by Lennart Demes
+  URL:    https://ambientcg.com/view?id=Ground048
+  License: CC0 1.0 Public Domain
+
+assets/roots/root_dl_1..3.png
+  Derived from the downloaded CC0 ambientCG StickSet001 photos (thin sticks), darkened and warmed
+  to read as roots. (No suitably licensed transparent root PNGs were found on Wikimedia Commons;
+  Openverse's API was not responding.) License: CC0 1.0 Public Domain
+
+Processing: the Opacity map was applied as the alpha channel, the sheet was split into
+individual objects, trimmed and resized (Python/Pillow).
+
+GENERATED (procedurally, Python/Pillow + NumPy, made for this site; public domain)
+-----------------------------------------------------------------------------------
+assets/sticks/stick_gen_1.png, stick_gen_2.png   (tapered bark-textured sticks)
+assets/leaves/leaf_gen_1..3.png                  (vein-patterned green leaves)
+assets/concrete.png                              (tileable concrete noise texture)
+assets/roots/root_gen_1..3.png                   (tapered, wiggly dark-bark roots with rootlet hairs)
+assets/dirt/dirt_gen.png                         (procedural soil texture)
+assets/dirt/clod_gen_1..4.png                    (procedural soil clods)
+
+Burnt variants (assets/burnt/sticks, assets/burnt/leaves, assets/burnt/roots)
+- One charred version of every stick, leaf and root image above, same filenames.
+- Generated locally from those images (procedural charring, ash cracks, curl, singed edges, burn holes).
+- Same status as their sources: CC0 / public domain.
+
+Grass & bushes (assets/plants, burnt versions in assets/burnt/plants)
+- grass_dl_1/2: recoloured and cropped from "Grass (NIH BioArt 181)" by Ryan Kissinger / NIAID, Wikimedia Commons, public domain.
+  https://commons.wikimedia.org/wiki/File:Grass_(NIH_BioArt_181).png
+- bush_dl_1..3: composed from the ambientCG CC0 leaf cutouts and stick images listed above.
+- grass_gen_1..4, bush_gen_1..2: procedurally generated for this project (public domain / CC0).
+- All burnt plant variants: generated from the above, same status.
