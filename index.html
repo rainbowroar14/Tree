@@ -1,0 +1,1280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sprout</title>
+<style>
+  html,body{margin:0;height:100%;background:#fff;overflow:hidden}
+  #stage{position:fixed;inset:0;cursor:pointer}
+  .tree{position:absolute;will-change:transform}
+  .tree canvas,#slab{position:absolute;left:0;top:0}
+  .tree.sway{animation:sway var(--d,7s) ease-in-out infinite}
+  @keyframes sway{0%{transform:rotate(0)}25%{transform:rotate(var(--a,.5deg))}75%{transform:rotate(calc(var(--a,.5deg) * -1))}100%{transform:rotate(0)}}
+  /* flutter: wrapper holds the leaf's fixed angle, the canvas inside animates with plain literal keyframes (compositor-friendly) */
+  .lw{position:absolute;transform-origin:50% 100%}
+  .lw canvas{position:absolute;left:0;top:0;transform-origin:50% 100%;animation:f1 2.4s ease-in-out infinite}
+  .lw.a2 canvas{animation-name:f2}.lw.a3 canvas{animation-name:f3}
+  @keyframes f1{0%,100%{transform:rotate(0)}25%{transform:rotate(4deg)}75%{transform:rotate(-4deg)}}
+  @keyframes f2{0%,100%{transform:rotate(0)}25%{transform:rotate(-5.5deg)}75%{transform:rotate(5.5deg)}}
+  @keyframes f3{0%,100%{transform:rotate(0)}25%{transform:rotate(7deg)}75%{transform:rotate(-7deg)}}
+  @media (prefers-reduced-motion: reduce){.tree.sway,.lw canvas{animation:none!important}}
+  .gust{position:absolute;will-change:transform}
+  .plant{position:absolute;transform-origin:50% 100%;pointer-events:none}
+  .plant canvas{position:absolute;left:0;top:0;transform-origin:50% 100%}
+  .plant.sw canvas{animation:psway var(--d,3s) ease-in-out infinite}
+  @keyframes psway{0%,100%{transform:rotate(0)}25%{transform:rotate(var(--a,2deg))}75%{transform:rotate(calc(var(--a,2deg) * -1))}}
+  @media (prefers-reduced-motion: reduce){.plant.sw canvas{animation:none!important}}
+  .gust > .tree{left:0;top:0}
+  .lw{transition:opacity 2.5s}
+  #wet{position:absolute;left:0;pointer-events:none;opacity:0;transition:opacity 5s linear;
+       background:linear-gradient(to bottom,rgba(55,68,86,.36),rgba(55,68,86,.18) 16%,rgba(55,68,86,.24));box-shadow:inset 0 1px 0 rgba(255,255,255,.8),inset 0 3px 4px -2px rgba(255,255,255,.45)}
+  #rain{position:absolute;left:0;top:0;pointer-events:none}
+  .fall{position:absolute;left:0;top:0;pointer-events:none;will-change:transform;transition:opacity 3s}
+  #hint{position:fixed;left:0;right:0;bottom:14px;text-align:center;font:12px/1 system-ui,sans-serif;
+        letter-spacing:.12em;color:rgba(60,58,55,.45);text-transform:lowercase;opacity:0;transition:opacity 1.5s;pointer-events:none}
+  #hint.on{opacity:1}
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="hint">click a tree or bush to set it on fire &nbsp;·&nbsp; click empty space to regrow &nbsp;·&nbsp; f fire all &nbsp;·&nbsp; w gust &nbsp;·&nbsp; r rain &nbsp;·&nbsp; z reset</div>
+<script>
+(() => {
+'use strict';
+const P = (dir, names) => names.map(n => 'assets/' + dir + '/' + n);
+const STICKS = P('sticks', ['stick_dl_1.png','stick_dl_2.png','stick_dl_3.png','stick_dl_4.png','stick_dl_5.png','stick_dl_6.png','stick_gen_1.png','stick_gen_2.png']);
+const LEAVES = P('leaves', ['leaf_dl_1.png','leaf_dl_2.png','leaf_dl_3.png','leaf_dl_4.png','leaf_dl_5.png','leaf_dl_6.png','leaf_dl_7.png','leaf_dl_8.png',
+  'leaf_dl_9.png','leaf_dl_10.png','leaf_dl_11.png','leaf_dl_12.png','leaf_gen_1.png','leaf_gen_2.png','leaf_gen_3.png']);
+const ROOTS = P('roots', ['root_dl_1.png','root_dl_2.png','root_dl_3.png','root_gen_1.png','root_gen_2.png','root_gen_3.png']);
+const CLODS = P('dirt', ['clod_dl_1.png','clod_dl_2.png','clod_dl_3.png','clod_dl_4.png','clod_gen_1.png','clod_gen_2.png','clod_gen_3.png','clod_gen_4.png']);
+const DIRT = P('dirt', ['dirt_dl_ground048.jpg','dirt_gen.png']);
+const PLANTS = P('plants', ['grass_dl_1.png','grass_dl_2.png','grass_gen_1.png','grass_gen_2.png','grass_gen_3.png','grass_gen_4.png',
+                            'bush_dl_1.png','bush_dl_2.png','bush_dl_3.png','bush_gen_1.png','bush_gen_2.png']);
+const BURNT = list => list.map(p => p.replace('assets/', 'assets/burnt/'));      // charred variant of every stick / leaf / root
+
+const stage = document.getElementById('stage'), hint = document.getElementById('hint');
+const params = new URLSearchParams(location.search);
+const FREEZE = params.has('t') ? parseFloat(params.get('t')) : null;   // ?t=3 renders a still at 3s (screenshots)
+let seed = params.has('seed') ? parseInt(params.get('seed'), 10) : (Math.random() * 1e9) | 0;
+const MAX_LEAVES = 480, MAX_FLUTTER = 180;          // leaves that keep fluttering after growth (CSS-animated, compositor only)
+const RM = matchMedia('(prefers-reduced-motion: reduce)');
+let FLUTTER = !RM.matches;
+RM.addEventListener && RM.addEventListener('change', () => { FLUTTER = !RM.matches; });
+
+function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+let rnd; const R = (a, b) => a + (b - a) * rnd(); const pick = a => a[(rnd() * a.length) | 0];
+const clamp01 = x => x < 0 ? 0 : x > 1 ? 1 : x;
+const easeOut = x => 1 - Math.pow(1 - x, 3);
+const easeBack = x => { const c = 1.6; x -= 1; return 1 + (c + 1) * x * x * x + c * x * x; };
+const load = src => new Promise(res => { const i = new Image(); i.onload = () => res(i); i.onerror = () => res(null); i.src = src; });
+const mkCanvas = (w, h) => { const c = document.createElement('canvas'); c.width = Math.max(1, Math.ceil(w)); c.height = Math.max(1, Math.ceil(h)); return c; };
+
+let IMG = {};             // loaded images
+let leafTints = [];       // [leafIdx][tint] -> tinted full-res canvas (baked once at load)
+let W, H, DPR, groundY, slabH, SLAB_TOP_PAD = 46;
+let hintTimer = 0, trees = [], slab = null, rafId = 0, t0 = 0, endTime = 0, slabEnd = 0, running = false;
+
+// ---------- one-time asset prep ----------
+function bakeLeafTints(img){
+  // cheap, portable tints: draw leaf, then wash a colour over it with source-atop (no ctx.filter, no pixel reads)
+  return [null, 'rgba(170,160,30,.16)', 'rgba(10,55,25,.20)', 'rgba(255,250,200,.13)'].map(col => {
+    const c = mkCanvas(img.width, img.height), x = c.getContext('2d');
+    x.drawImage(img, 0, 0);
+    if (col) { x.globalCompositeOperation = 'source-atop'; x.fillStyle = col; x.fillRect(0, 0, c.width, c.height); }
+    return c;
+  });
+}
+
+// ---------- geometry (unit space; y up is negative) ----------
+function buildTree(maxDepth){
+  const branches = [], leaves = [];
+  function grow(len, w, ang, depth, start, x, y){
+    const dur = 1.9 * Math.pow(0.72, depth) + R(-.15, .15);
+    const img = depth < 2 ? pick(IMG.thick) : pick(IMG.thin);
+    branches.push({ x, y, ang, len, w, img, flip: rnd() < .5, start, dur, depth });
+    const at = f => [x + Math.sin(ang) * len * f, y - Math.cos(ang) * len * f];
+    if (depth < maxDepth) {
+      const n = depth === 0 ? 2 + (rnd() < .5 ? 1 : 0) : 2 + (rnd() < .3 ? 1 : 0), spread = R(.45, .75);
+      const [ex, ey] = at(.97);
+      for (let i = 0; i < n; i++) {
+        const a = -spread + 2 * spread * (i / (n - 1)) + R(-.15, .15);
+        grow(len * R(.62, .8), w * R(.62, .74), ang + a, depth + 1, start + dur * .97, ex, ey);
+      }
+      if (depth >= 1 && rnd() < .6) {
+        const f = R(.35, .7), [sx, sy] = at(f);
+        grow(len * R(.4, .55), w * .5, ang + (rnd() < .5 ? -1 : 1) * R(.7, 1.1), depth + 1, start + dur * f, sx, sy);
+      }
+    }
+    if (depth >= maxDepth - 1) {
+      const n = depth === maxDepth ? 3 + (rnd() * 2 | 0) : 1 + (rnd() * 2 | 0);
+      for (let i = 0; i < n; i++) {
+        const tip = depth === maxDepth && i === 0, f = tip ? 1 : depth === maxDepth ? R(.3, 1) : R(.4, .95);
+        const [lx, ly] = at(f), side = tip ? 0 : (rnd() < .5 ? -1 : 1);
+        leaves.push({ x: lx, y: ly, ang: ang + side * R(.5, 1.1), size: R(.75, 1.15), li: (rnd() * LEAVES.length) | 0, ti: (rnd() * 4) | 0,
+          start: start + dur * f + R(.15, .8), dur: .7, tip });
+      }
+    }
+  }
+  const t0 = R(0, .3);
+  grow(R(150, 200), R(26, 34), R(-.12, .12), 0, t0, 0, 0);
+  return { branches, leaves, start: t0 };
+}
+
+function bboxOf(tr){
+  let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = 6;
+  for (const b of tr.branches) {
+    const ex = b.x + Math.sin(b.ang) * b.len, ey = b.y - Math.cos(b.ang) * b.len;
+    x0 = Math.min(x0, b.x - b.w, ex - b.w); x1 = Math.max(x1, b.x + b.w, ex + b.w); y0 = Math.min(y0, ey - b.w);
+  }
+  for (const l of tr.leaves) { const r = 55 * l.size * 1.12; x0 = Math.min(x0, l.x - r); x1 = Math.max(x1, l.x + r); y0 = Math.min(y0, l.y - r); }
+  return { x0, x1, y0, y1 };
+}
+
+// ---------- pre-rendering at final pixel size ----------
+function preStick(img, wPx, lenPx, flip, flipV){
+  // bake the stick image into a canvas at exactly the size it will be drawn (base at canvas bottom)
+  const pad = wPx * .16, c = mkCanvas(wPx + 2, lenPx + pad + 2), x = c.getContext('2d');
+  x.translate(c.width / 2, c.height / 2); x.scale(flip ? -1 : 1, flipV ? -1 : 1);
+  x.drawImage(img, -wPx / 2, -c.height / 2 + 1, wPx, c.height - 2);
+  return c;
+}
+const leafCache = new Map();
+function preLeaf(li, ti, hPx){
+  const hb = Math.max(6, Math.round(hPx / 4) * 4);           // size buckets keep the cache small
+  const key = li + '_' + ti + '_' + hb;
+  let c = leafCache.get(key);
+  if (!c) {
+    const src = leafTints[li][ti], w = hb * src.width / src.height;
+    c = mkCanvas(w, hb); c.getContext('2d').drawImage(src, 0, 0, c.width, c.height);
+    leafCache.set(key, c);
+  }
+  return c;
+}
+
+// draw helpers (device-pixel space, no resampling except the rotation itself)
+function drawStick(ctx, s, px, py, g, ox, oy){
+  const c = s.pre, sh = Math.max(1, c.height * g), cs = Math.cos(s.ang), sn = Math.sin(s.ang);
+  ctx.setTransform(cs, sn, -sn, cs, (s.x * s.k + ox) , (s.y * s.k + oy));
+  ctx.drawImage(c, 0, c.height - sh, c.width, sh, -c.width / 2, s.w * s.k * .08 - sh, c.width, sh);
+}
+function drawLeaf(ctx, l, sc, ox, oy){
+  const c = l.pre, cs = Math.cos(l.ang) * sc, sn = Math.sin(l.ang) * sc;
+  ctx.setTransform(cs, sn, -sn, cs, l.x * l.k + ox, l.y * l.k + oy);
+  ctx.drawImage(c, -c.width / 2, -c.height);
+}
+
+// ---------- layout ----------
+function build(){
+  rnd = mulberry(seed);
+  stage.innerHTML = ''; leafCache.clear();
+  DPR = Math.min(window.devicePixelRatio || 1, 1.5);
+  W = innerWidth; H = innerHeight;
+  slabH = Math.round(Math.max(70, Math.min(140, H * .14)));
+  groundY = H - slabH;
+  const count = W < 700 ? 1 : W < 1200 ? 2 : 3, colW = W / count;
+  trees = [];
+  let raw = [];
+  for (let i = 0; i < count; i++) raw.push(buildTree(4));
+  // cap total leaves (keep tip leaves first)
+  const total = raw.reduce((s, t) => s + t.leaves.length, 0);
+  if (total > MAX_LEAVES) for (const t of raw) {
+    const keep = Math.floor(t.leaves.length * MAX_LEAVES / total);
+    t.leaves.sort((a, b) => (b.tip - a.tip) || (rnd() - .5)); t.leaves.length = keep;
+  }
+  raw.forEach((tr, i) => {
+    tr.start += i * .45;
+    tr.branches.forEach(b => b.start += i * .45); tr.leaves.forEach(l => l.start += i * .45);
+    const bb = bboxOf(tr), bw = bb.x1 - bb.x0, bh = -bb.y0;
+    const k = Math.min(colW * .9 / bw, (groundY - 24) / bh, 1.7);        // fit the tree inside its own column
+    const cx = colW * (i + .5) - (bb.x0 + bb.x1) / 2 * k;                    // centre the canopy in the column
+    const kp = k * DPR;
+    // wrapper + layers, sized to the tree's bounding box
+    const left = cx + bb.x0 * k - 4, top = groundY + bb.y0 * k - 4, wCss = bw * k + 8, hCss = (bb.y1 - bb.y0) * k + 8;
+    const el = document.createElement('div'); el.className = 'tree';
+    const origin = (cx - left) + 'px ' + (groundY - top) + 'px';
+    Object.assign(el.style, { width: wCss + 'px', height: hCss + 'px', transformOrigin: origin });
+    // outer wrapper takes wind gust bending (JS spring), inner .tree keeps the idle CSS sway
+    const gel = document.createElement('div'); gel.className = 'gust';
+    Object.assign(gel.style, { left: left + 'px', top: top + 'px', width: wCss + 'px', height: hCss + 'px', transformOrigin: origin });
+    gel.appendChild(el);
+    el.style.setProperty('--d', R(6, 9).toFixed(2) + 's'); el.style.setProperty('--a', R(.35, .6).toFixed(2) + 'deg');
+    // pick the fluttering subset: twig-tip leaves first, then the outermost others
+    const nf = Math.floor(MAX_FLUTTER / count);
+    tr.leaves.map(l => ({ l, sc: (l.tip ? 1e6 : 0) + Math.hypot(l.x, l.y) + rnd() * 40 })).sort((a, b) => b.sc - a.sc)
+      .forEach((e, j) => { const l = e.l; l.flutter = j < nf; l.famp = R(.06, .13); l.fw = R(1.8, 3.4); l.fph = R(0, 6.28); });
+    const layers = ['bdone', 'active', 'ldone', 'flutter'].map(() => {
+      const c = mkCanvas(wCss * DPR, hCss * DPR); c.style.width = wCss + 'px'; c.style.height = hCss + 'px'; el.appendChild(c); return c.getContext('2d');
+    });
+    stage.appendChild(gel);
+    const ox = (cx - left) * DPR, oy = (groundY - top) * DPR;
+    for (const b of tr.branches) { b.k = kp; b.pre = preStick(b.img, b.w * kp, b.len * kp, b.flip, false); }
+    for (const l of tr.leaves) { l.k = kp; l.pre = preLeaf(l.li, l.ti, 55 * l.size * kp); }
+    const items = tr.branches.map(b => ({ kind: 0, o: b })).concat(tr.leaves.map(l => ({ kind: 1, o: l })));
+    const end = Math.max(...items.map(it => it.o.start + it.o.dur));
+    const fl = tr.leaves.filter(l => l.flutter);
+    let fb = [1e9, 1e9, -1e9, -1e9];
+    for (const l of fl) { const lx = l.x * kp + ox, ly = l.y * kp + oy, r = l.pre.height * 1.05 + 2;
+      fb = [Math.min(fb[0], lx - r), Math.min(fb[1], ly - r), Math.max(fb[2], lx + r), Math.max(fb[3], ly + r)]; }
+    fb = [Math.max(0, Math.floor(fb[0])), Math.max(0, Math.floor(fb[1])), Math.ceil(fb[2]), Math.ceil(fb[3])];
+    trees.push({ el, layers, ox, oy, pending: items, end, k, x: cx, w0: tr.branches[0].w * k, start: tr.start, dirty: null, swaying: false,
+                 commit: [], fl, fbox: fb, fStart: 0, gel, bend: 0, bendV: 0, flex: R(.8, 1.2),
+                 branches: tr.branches, leaves: tr.leaves, left, top, wCss, hCss, kp, fire: null });
+  });
+  endTime = Math.max(...trees.map(t => t.end));
+  buildSlab();
+  buildPlants();
+}
+
+// ---------- concrete slab, dirt openings, roots ----------
+function buildSlab(){
+  const c = mkCanvas(W * DPR, (slabH + SLAB_TOP_PAD) * DPR);
+  c.id = 'slab'; c.style.width = W + 'px'; c.style.height = (slabH + SLAB_TOP_PAD) + 'px'; c.style.top = (groundY - SLAB_TOP_PAD) + 'px';
+  stage.appendChild(c);
+  const gy = SLAB_TOP_PAD * DPR;                       // ground line inside slab canvas (device px)
+  // static concrete, baked once
+  const base = mkCanvas(c.width, c.height), b = base.getContext('2d');
+  b.scale(DPR, DPR);
+  const pat = b.createPattern(IMG.concrete, 'repeat');
+  b.fillStyle = pat; b.fillRect(0, SLAB_TOP_PAD, W, slabH);
+  const gr = b.createLinearGradient(0, SLAB_TOP_PAD, 0, SLAB_TOP_PAD + slabH);
+  gr.addColorStop(0, 'rgba(255,255,255,.35)'); gr.addColorStop(.06, 'rgba(255,255,255,0)'); gr.addColorStop(1, 'rgba(0,0,0,.12)');
+  b.fillStyle = gr; b.fillRect(0, SLAB_TOP_PAD, W, slabH);
+  b.fillStyle = 'rgba(0,0,0,.10)'; b.fillRect(0, SLAB_TOP_PAD, W, 1);
+  b.strokeStyle = 'rgba(0,0,0,.07)'; b.lineWidth = 1.5;
+  for (let x = W / 5; x < W; x += W / 5) { b.beginPath(); b.moveTo(x + .5, SLAB_TOP_PAD + 2); b.lineTo(x + .5, SLAB_TOP_PAD + slabH); b.stroke(); }
+
+  const spots = trees.map((tr, ti) => {
+    const s = Math.max(.5, tr.k), x = tr.x * DPR, tw = tr.w0;
+    // jagged broken opening in the slab, filled with soil (pre-rendered sprite in slab coords)
+    const hw = tw * R(2.1, 2.7), depth = Math.min(slabH * R(.5, .72), tw * 3.4);
+    const poly = [[-hw * 1.15, 0]];
+    const n = 13;
+    for (let i = 1; i < n; i++) { const f = i / n, xx = -hw + 2 * hw * f; poly.push([xx + R(-3, 3) * s, depth * Math.sin(Math.PI * f) ** .45 * R(.82, 1.08) + 2]); }
+    poly.push([hw * 1.15, 0]);
+    // each opening gets its own small canvas (only this region animates; the big slab stays static)
+    const ext = Math.max(hw * 2.9, 270 * s), left = Math.max(0, Math.floor(tr.x - ext)), right = Math.min(W, Math.ceil(tr.x + ext));
+    const spotW = (right - left) * DPR, spotH = c.height;
+    const hole = mkCanvas(spotW, spotH), h = hole.getContext('2d');
+    h.setTransform(DPR, 0, 0, DPR, -left * DPR, 0); h.translate(tr.x, SLAB_TOP_PAD);
+    const path = new Path2D(); poly.forEach(([px, py], i) => i ? path.lineTo(px, py) : path.moveTo(px, py)); path.closePath();
+    h.save(); h.clip(path);
+    h.fillStyle = h.createPattern(ti % 2 ? IMG.dirt[1] : IMG.dirt[0], 'repeat'); h.fillRect(-hw * 1.3, -2, hw * 2.6, depth + 8);
+    const sg = h.createLinearGradient(0, 0, 0, depth); sg.addColorStop(0, 'rgba(0,0,0,.05)'); sg.addColorStop(1, 'rgba(0,0,0,.35)');
+    h.fillStyle = sg; h.fillRect(-hw * 1.3, -2, hw * 2.6, depth + 8);
+    h.restore();
+    h.lineJoin = 'round';
+    h.strokeStyle = 'rgba(35,30,26,.55)'; h.lineWidth = 2.2; h.stroke(path);               // dark broken edge
+    h.translate(0, 1.2); h.strokeStyle = 'rgba(255,255,255,.35)'; h.lineWidth = 1; h.stroke(path); // light chipped rim
+    // cracks radiating outward from the opening
+    const cracks = [];
+    for (let k = 0; k < 4 + (rnd() * 3 | 0); k++) {
+      const dir = k % 2 ? 1 : -1, pts = [[tr.x + dir * hw * R(.7, 1.05), SLAB_TOP_PAD + R(2, depth * .6)]];
+      let px = pts[0][0], py = pts[0][1], ang = R(.05, .7);
+      for (let j = 0; j < 4 + (rnd() * 4 | 0); j++) { ang += R(-.35, .35); px += dir * Math.cos(ang) * R(8, 22) * s; py += Math.sin(Math.abs(ang)) * R(2, 7) * s; if (py > SLAB_TOP_PAD + slabH - 3) break; pts.push([px, py]); }
+      cracks.push({ pts, w: R(.8, 1.8) });
+    }
+    // soil mound + crumbs on top of the slab, concrete chips (one sprite)
+    const top = mkCanvas(spotW, spotH), tp = top.getContext('2d');
+    tp.setTransform(DPR, 0, 0, DPR, -left * DPR, 0);
+    tp.fillStyle = tp.createPattern(IMG.dirt[0], 'repeat');
+    tp.beginPath(); tp.moveTo(tr.x - hw * 1.35, SLAB_TOP_PAD + 1);
+    for (let i = 0; i <= 12; i++) { const f = i / 12, xx = tr.x - hw * 1.35 + hw * 2.7 * f; tp.lineTo(xx, SLAB_TOP_PAD + 1 - Math.sin(Math.PI * f) ** .9 * R(7, 11) * s); }
+    tp.closePath(); tp.fill();
+    tp.fillStyle = 'rgba(0,0,0,.18)'; tp.fill();
+    const clods = [];
+    for (let k = 0; k < 9 + (rnd() * 6 | 0); k++) {
+      const img = pick(IMG.clods), sc = R(.35, .8) * s, onTop = rnd() < .65;
+      const dx = (rnd() < .5 ? -1 : 1) * R(hw * .6, hw * (onTop ? 2.6 : 1.8));
+      const cy = onTop ? SLAB_TOP_PAD + 1 - img.height * sc * R(.55, .8) : SLAB_TOP_PAD + R(4, depth + 10);
+      tp.drawImage(img, tr.x + dx - img.width * sc / 2, cy, img.width * sc, img.height * sc);
+    }
+    tp.fillStyle = 'rgba(160,158,154,1)';
+    for (let k = 0; k < 3; k++) { const dx = (k % 2 ? 1 : -1) * R(hw * 1.2, hw * 2.2), sz = R(2.5, 5) * s; tp.beginPath(); tp.moveTo(tr.x + dx, SLAB_TOP_PAD + 1); tp.lineTo(tr.x + dx + sz, SLAB_TOP_PAD + 1); tp.lineTo(tr.x + dx + sz * .4, SLAB_TOP_PAD + 1 - sz * .8); tp.fill(); }
+    // roots: recursive, growing down/outward from the trunk base, drawn with root sprites
+    const roots = [];
+    function root(len, w, ang, depth, start, x, y){
+      const dur = depth === 0 ? R(1.2, 1.6) : R(.7, 1);
+      const r = { x, y, ang, len, w, start, dur, k: DPR };
+      const img = pick(IMG.roots), gen = IMG.roots.indexOf(img) >= 3;
+      r.img = img; r.gen = gen; r.fl = rnd() < .5;
+      r.pre = preStick(img, w * DPR, len * DPR, r.fl, gen);   // generated roots: thick end at base
+      roots.push(r);
+      if (depth < 2) {
+        const m = depth === 0 ? 2 : 1 + (rnd() < .5 ? 1 : 0);
+        for (let i = 0; i < m; i++) {
+          const f = R(.35, .8), sx = x + Math.sin(ang) * len * f, sy = y - Math.cos(ang) * len * f;
+          root(len * R(.4, .6), w * R(.5, .65), ang + (rnd() < .5 ? -1 : 1) * R(.3, .6), depth + 1, start + dur * f, sx, sy);
+        }
+      }
+    }
+    const nMain = 3 + (rnd() * 2 | 0);
+    for (let i = 0; i < nMain; i++) {
+      const side = i % 2 ? 1 : -1, spread = i < 2 ? R(.15, .55) : R(.6, 1.15);
+      root(Math.min(slabH * R(.5, .85), 130 * s), tw * R(.4, .55), Math.PI + side * spread, 0, tr.start - .15 + R(0, .4),
+           tr.x + side * R(0, hw * .4), SLAB_TOP_PAD + R(2, 6));
+    }
+    const rEnd = Math.max(...roots.map(r => r.start + r.dur));
+    const sc = mkCanvas(spotW, spotH); sc.className = 'spot';
+    Object.assign(sc.style, { position: 'absolute', left: left + 'px', top: (groundY - SLAB_TOP_PAD) + 'px', width: (right - left) + 'px', height: (slabH + SLAB_TOP_PAD) + 'px' });
+    stage.appendChild(sc);
+    return { tr, hole, top, cracks, roots, left, ctx: sc.getContext('2d'), start: tr.start - .2, end: Math.max(rEnd, tr.start + .8), done: false };
+  });
+  slabEnd = Math.max(...spots.map(s => s.end));
+  c.getContext('2d').drawImage(base, 0, 0);          // the slab itself is drawn once
+  slab = { spots, done: false };
+}
+
+// ---------- grass tufts & bushes: sprout from the dirt openings and along the slab ----------
+let plants = [];
+function buildPlants(){
+  plants = [];
+  if (!IMG.grass || !IMG.grass.length) return;
+  const sc = Math.max(.6, Math.min(1.2, trees.reduce((a, t) => a + t.k, 0) / Math.max(1, trees.length)));
+  const add = (kind, x, hCss, start) => {
+    const set = kind === 'g' ? IMG.grass : IMG.bush, pk = pick(set), img = pk.n;
+    const h = hCss, w = h * img.width / img.height, flip = rnd() < .5;
+    const el = document.createElement('div'); el.className = 'plant' + (RM.matches ? '' : ' sw');
+    Object.assign(el.style, { left: (x - w / 2) + 'px', top: (groundY - h + (kind === 'g' ? 3 : 5)) + 'px', width: w + 'px', height: h + 'px' });
+    el.style.setProperty('--d', R(2.2, 4.2).toFixed(2) + 's'); el.style.setProperty('--a', (kind === 'g' ? R(1.5, 3.5) : R(.6, 1.2)).toFixed(2) + 'deg');
+    const cv = mkCanvas(w * DPR, h * DPR); cv.style.width = w + 'px'; cv.style.height = h + 'px';
+    const ctx = cv.getContext('2d'); if (flip) { ctx.translate(cv.width, 0); ctx.scale(-1, 1); }
+    ctx.drawImage(img, 0, 0, cv.width, cv.height);
+    el.appendChild(cv); stage.appendChild(el);
+    const p = { kind, x, w, h, el, cv, ctx, img, bimg: pk.b, flip, state: 0, start };
+    if (FREEZE == null || FREEZE < start + 1.2)
+      el.animate([{ transform: 'scale(.3,0)' }, { transform: 'scale(1.04,1.08)', offset: .7 }, { transform: 'scale(1)' }],
+                 { duration: (kind === 'g' ? 1100 : 1700), delay: Math.max(0, start - (FREEZE || 0)) * 1000, easing: 'ease-out', fill: 'backwards' });
+    plants.push(p);
+  };
+  const holes = [];
+  for (const tr of trees) {
+    const hw = tr.w0 * 2.4;
+    holes.push([tr.x - hw * 1.2, tr.x + hw * 1.2]);
+    const n = 2 + (rnd() * 3 | 0);
+    for (let i = 0; i < n; i++) add('g', tr.x + (rnd() < .5 ? -1 : 1) * R(hw * .4, hw * 2.4), R(42, 72) * sc, tr.start + R(1, 5));
+    if (rnd() < .85) add('b', tr.x + (rnd() < .5 ? -1 : 1) * R(hw * 1.8 + 30 * sc, hw * 1.8 + 140 * sc), R(70, 110) * sc, tr.start + R(2.5, 6));
+  }
+  // along the slab: a few clumps in the cracks between the trees, sometimes a little bush
+  const m = Math.round(W / 130);
+  for (let i = 0; i < m; i++) {
+    const x = R(20, W - 20);
+    if (holes.some(([a, b]) => x > a && x < b)) continue;
+    if (rnd() < .22) add('b', x, R(55, 85) * sc, R(3, 8)); else add('g', x, R(34, 60) * sc, R(2, 8));
+    if (rnd() < .5) add('g', x + R(-35, 35) * sc, R(26, 46) * sc, R(2.5, 8.5));
+  }
+}
+
+function drawSlab(t){
+  let busy = false;
+  for (const s of slab.spots) {
+    if (s.done) continue;
+    const g = clamp01((t - s.start) / .6);
+    if (g <= 0) { busy = true; continue; }
+    drawSpot(s, t, g);
+    if (t > s.end + .1) s.done = true; else busy = true;
+  }
+  return busy;
+}
+function drawSpot(s, t, g){
+  {
+    const ctx = s.ctx, ox = -s.left * DPR;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    ctx.globalAlpha = g; ctx.drawImage(s.hole, 0, 0); ctx.globalAlpha = 1;
+    for (const r of s.roots) {
+      const rg = clamp01((t - r.start) / r.dur);
+      if (rg > 0) drawStick(ctx, r, 0, 0, easeOut(rg), ox, 0);
+    }
+    ctx.setTransform(DPR, 0, 0, DPR, ox, 0);
+    ctx.strokeStyle = 'rgba(45,42,40,.5)'; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    for (const cr of s.cracks) {
+      const n = Math.max(2, Math.ceil(cr.pts.length * g));
+      ctx.lineWidth = cr.w; ctx.beginPath();
+      for (let i = 0; i < n; i++) i ? ctx.lineTo(cr.pts[i][0], cr.pts[i][1]) : ctx.moveTo(cr.pts[i][0], cr.pts[i][1]);
+      ctx.stroke();
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = clamp01((t - s.start - .2) / .6); ctx.drawImage(s.top, 0, 0); ctx.globalAlpha = 1;
+  }
+}
+
+// ---------- per-frame: only in-progress pieces are redrawn; finished ones are baked into static layers ----------
+function stepTree(tr, t){
+  const [bdone, active, ldone] = tr.layers;   // layers[3] = fluttering leaves
+  if (tr.dirty) { active.setTransform(1, 0, 0, 1, 0, 0); const d = tr.dirty; active.clearRect(d[0], d[1], d[2] - d[0], d[3] - d[1]); tr.dirty = null; }
+  if (!tr.pending.length && !tr.commit.length) return false;
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  const still = [], queued = tr.commit; tr.commit = [];
+  for (const it of queued.concat(tr.pending)) {
+    const o = it.o, g = (t - o.start) / o.dur;
+    if (g <= 0) { still.push(it); continue; }
+    if (g >= 1) { tr.commit.push(it); continue; }      // finished: bake straight into the static layer below
+    still.push(it);
+    if (it.kind) drawLeaf(active, o, easeBack(g), tr.ox, tr.oy); else drawStick(active, o, 0, 0, easeOut(g), tr.ox, tr.oy);
+    const cx = o.x * o.k + tr.ox, cy = o.y * o.k + tr.oy, r = Math.max(o.pre.width, o.pre.height) * 1.15 + 2;
+    if (cx - r < x0) x0 = cx - r; if (cy - r < y0) y0 = cy - r; if (cx + r > x1) x1 = cx + r; if (cy + r > y1) y1 = cy + r;
+  }
+  tr.pending = still;
+  if (tr.commit.length) {
+    for (const it of tr.commit) it.kind ? drawLeaf(it.o.flutter ? tr.layers[3] : ldone, it.o, 1, tr.ox, tr.oy) : drawStick(bdone, it.o, 0, 0, 1, tr.ox, tr.oy);
+    tr.commit = [];
+  }
+  if (x1 > x0) tr.dirty = [Math.floor(x0), Math.floor(y0), Math.ceil(x1), Math.ceil(y1)];
+  return true;
+}
+
+function frame(now){
+  const t = FREEZE != null ? FREEZE : (now - t0) / 1000;
+  let busy = false;
+  for (const tr of trees) {
+    if (stepTree(tr, t) || tr.dirty) busy = true;
+    if (!tr.swaying && !tr.pending.length && !tr.commit.length && !tr.dirty && FREEZE == null) {
+      // flatten the finished tree into a single canvas (fewer layers to composite), then sway it with CSS only
+      const [bdone, active, ldone] = tr.layers;
+      bdone.setTransform(1, 0, 0, 1, 0, 0); bdone.drawImage(ldone.canvas, 0, 0);
+      active.canvas.remove(); ldone.canvas.remove();
+      tr.base = ldone.canvas; tr.base.getContext('2d').drawImage(bdone.canvas, 0, 0);   // keep a clean copy (used by Weather.calm)
+      tr.swaying = true; tr.el.classList.add('sway');
+      spawnFlutterLeaves(tr);
+    }
+  }
+  if (!slab.done) { if (drawSlab(t)) busy = true; else slab.done = true; }
+  hint.classList.toggle('on', t > endTime + .5);
+  const loop = FREEZE == null && busy;
+  if (loop) rafId = requestAnimationFrame(frame);
+  else { running = false; if (FREEZE == null) hintTimer = setTimeout(() => hint.classList.add('on'), Math.max(0, (endTime + .5 - t) * 1000)); }                                   // idle (reduced motion / hidden tab / still frame): loop stops, sway stays pure CSS
+}
+
+// After growth the fluttering subset becomes tiny DOM canvases animated by CSS keyframes:
+// the compositor runs it on its own, no JS per frame, paused automatically in hidden tabs.
+function spawnFlutterLeaves(tr){
+  if (!FLUTTER || !tr.fl.length) return;
+  const todo = tr.fl.slice(), gen = tr.el;
+  const chunk = () => {                                  // small batches per frame so there's no hitch
+    if (!gen.isConnected || tr.fire) return;             // tree was rebuilt / set on fire meanwhile
+    const frag = document.createDocumentFragment();
+    for (const l of todo.splice(0, 6)) {
+      const c = mkCanvas(l.pre.width, l.pre.height); c.getContext('2d').drawImage(l.pre, 0, 0);
+      const w = c.width / DPR, h = c.height / DPR;
+      const wr = document.createElement('div');
+      wr.className = 'lw a' + (1 + ((l.fph * 10) | 0) % 3);
+      wr.style.cssText = `width:${w}px;height:${h}px;left:${(l.x * l.k + tr.ox) / DPR - w / 2}px;top:${(l.y * l.k + tr.oy) / DPR - h}px;transform:rotate(${l.ang.toFixed(4)}rad)`;
+      c.style.cssText = `width:${w}px;height:${h}px;animation-duration:${(6.283 / l.fw).toFixed(2)}s;animation-delay:${(l.fph / 6.283 * 2).toFixed(2)}s`;
+      wr.appendChild(c); frag.appendChild(wr); l.el = wr;
+    }
+    gen.appendChild(frag);
+    if (todo.length) requestAnimationFrame(chunk);
+    else tr.layers[3].canvas.remove();                   // static copies go away once all live leaves are in place
+  };
+  requestAnimationFrame(chunk);
+}
+
+// ---------- weather: rain showers + wind gusts ----------
+// Everything here is precomputed and handed to the compositor (CSS keyframes / Web Animations):
+// no per-frame JavaScript and no per-frame canvas drawing while it rains or blows.
+const WEATHER_ON = params.get('weather') !== 'off';
+function RainCore(scope){
+  // self-contained (also stringified into a worker): rain streaks + splash ripples on one low-res canvas
+  let ctx, RS = .5, FPS = 30, W = 0, H = 0, gy = 0, drops = [], splashes = [], rain = 0, target = 0, windBase = 0, gust = null;
+  let running = false, paused = false, lastT = 0, lastDraw = 0;
+  const now = () => performance.now();
+  const raf = cb => scope.requestAnimationFrame ? scope.requestAnimationFrame(cb) : setTimeout(() => cb(now()), 16);
+  function newDrop(anywhere){
+    const sp = 900 + Math.random() * 450;
+    return { x: Math.random() * W * 1.5 - W * .25, y: anywhere ? Math.random() * gy : -Math.random() * H * .3 - 20, sp,
+             len: sp * (.016 + Math.random() * .01), floor: gy + Math.random() * 7 };
+  }
+  function windNow(){
+    if (!gust) return windBase;
+    const g = gust, u = now() / 1000 - g.t0, L = g.rise + g.hold + g.fall;
+    if (u > L) { gust = null; return windBase; }
+    const e = u < g.rise ? Math.sin(u / g.rise * Math.PI / 2) ** 2 : u < g.rise + g.hold ? 1 : .5 + .5 * Math.cos((u - g.rise - g.hold) / g.fall * Math.PI);
+    return windBase + g.dir * g.s * e * (1 + .22 * Math.sin(u * 6.3 + g.ph) + .12 * Math.sin(u * 13.7));
+  }
+  function tick(){
+    if (paused) { running = false; return; }
+    const t = now();
+    if (t - lastDraw < 1000 / FPS - 4) { raf(tick); return; }
+    const dt = Math.max(0, Math.min(.08, (t - lastT) / 1000)); lastT = t; lastDraw = t;
+    rain += (target - rain) * Math.min(1, dt * (target > rain ? .35 : .3));
+    if (target === 0 && rain < .01) rain = 0;
+    const slant = windNow() * .45, active = Math.floor(drops.length * rain), x = ctx;
+    x.setTransform(RS, 0, 0, RS, 0, 0); x.clearRect(0, 0, W, H);
+    x.lineCap = 'round'; x.strokeStyle = 'rgba(100,122,146,.45)'; x.lineWidth = 1.2; x.beginPath();
+    for (let i = 0; i < drops.length; i++) {
+      const d = drops[i];
+      d.y += d.sp * dt; d.x += d.sp * slant * dt;
+      if (d.y >= d.floor) {
+        if (i < active && splashes.length < 70 && Math.random() < .5) splashes.push({ x: d.x, y: d.floor, t: 0, r: 3 + Math.random() * 4 });
+        Object.assign(d, newDrop(false)); d.x -= W * .3 * slant;
+        continue;
+      }
+      if (i >= active || d.y < 0) continue;
+      x.moveTo(d.x, d.y); x.lineTo(d.x - d.len * slant, d.y - d.len);
+    }
+    x.stroke();
+    x.lineWidth = 1.8; x.beginPath();
+    for (let i = splashes.length - 1; i >= 0; i--) {
+      const p = splashes[i]; p.t += dt;
+      if (p.t > .38) { splashes.splice(i, 1); continue; }
+      const rr = p.r * (.3 + p.t / .38);
+      x.moveTo(p.x + rr, p.y); x.ellipse(p.x, p.y, rr, rr * .28, 0, 0, Math.PI * 2);
+    }
+    x.stroke();
+    if (rain > 0 || target > 0 || splashes.length) raf(tick);
+    else { x.setTransform(1, 0, 0, 1, 0, 0); x.clearRect(0, 0, x.canvas.width, x.canvas.height); running = false; }   // dry: loop stops
+  }
+  function start(){ if (!running && !paused && ctx) { running = true; lastT = now(); raf(tick); } }
+  scope.onmessage = e => {
+    const m = e.data;
+    if (m.type === 'init') { ctx = m.canvas.getContext('2d'); RS = m.RS; FPS = m.FPS; W = m.W; H = m.H; gy = m.gy; drops = []; for (let i = 0; i < m.n; i++) drops.push(newDrop(true)); }
+    else if (m.type === 'rain') { target = m.v; if (m.v > 0) start(); }
+    else if (m.type === 'wind') windBase = m.v;
+    else if (m.type === 'gust') gust = Object.assign({}, m.g, { t0: now() / 1000 });
+    else if (m.type === 'pause') paused = true;
+    else if (m.type === 'resume') { paused = false; if (target > 0 || rain > 0) start(); }
+    else if (m.type === 'stop') { target = rain = 0; paused = true; }
+  };
+}
+const Weather = (() => {
+  const RS = +(params.get('rs') || .5), RFPS = +(params.get('rfps') || 30);
+  let rc, wet, timers = [], showerOn = false, showerTimer = 0, windBase = 0;
+  let gust = null, fallen = [];
+  const enabled = () => WEATHER_ON && !RM.matches;
+  const later = (sec, fn) => { const id = setTimeout(() => { if (document.hidden) later(2, fn); else fn(); }, sec * 1000); timers.push(id); return id; };
+  const rand = (a, b) => a + (b - a) * Math.random();
+
+  // Rain runs in a Web Worker on an OffscreenCanvas when available, so its frames go straight to the
+  // compositor without a main-thread commit (with ~180 animated leaf layers that commit is the expensive part).
+  // Falls back to the same code on the main thread.
+  let engine = null;
+  function makeEngine(canvas){
+    const init = { type: 'init', RS, FPS: RFPS, W, H, gy: groundY, n: Math.round(200 * Math.min(1.6, (W * H) / (1920 * 1080)) + 40) };
+    try {
+      if (!canvas.transferControlToOffscreen || !window.Worker || params.get('rainworker') === 'off') throw 0;
+      const url = URL.createObjectURL(new Blob(['(' + RainCore.toString() + ')(self);'], { type: 'text/javascript' }));
+      const wk = new Worker(url); URL.revokeObjectURL(url);
+      const off = canvas.transferControlToOffscreen();
+      wk.postMessage(Object.assign(init, { canvas: off }), [off]);
+      return { post: m => wk.postMessage(m), kill: () => wk.terminate(), worker: true };
+    } catch (e) {
+      const scope = { requestAnimationFrame: cb => requestAnimationFrame(cb) };
+      RainCore(scope);
+      scope.onmessage({ data: Object.assign(init, { canvas }) });
+      return { post: m => scope.onmessage({ data: m }), kill: () => scope.onmessage({ data: { type: 'stop' } }), worker: false };
+    }
+  }
+  document.addEventListener('visibilitychange', () => engine && engine.post({ type: document.hidden ? 'pause' : 'resume' }));
+
+  function attach(){
+    timers.forEach(clearTimeout); timers = []; showerOn = false; gust = null; fallen = []; windBase = 0; calmed = []; rFrom = rTo = 0; fireOn = false; probeOn = false;
+    wet = document.createElement('div'); wet.id = 'wet';
+    Object.assign(wet.style, { top: groundY + 'px', width: W + 'px', height: slabH + 'px' });
+    stage.appendChild(wet);
+    // rain: one low-resolution canvas (soft streaks, few pixels), drawn only while it rains, at ~30fps
+    rc = mkCanvas(W * RS, H * RS); rc.id = 'rain'; rc.style.width = W + 'px'; rc.style.height = H + 'px';
+    stage.appendChild(rc);
+    if (engine) engine.kill();
+    engine = makeEngine(rc);
+    if (!enabled() || params.get('weather') === 'manual') return;   // manual: only the W / R keys
+    const grownIn = Math.max(0, endTime - (FREEZE != null ? FREEZE : 0)) + 1;
+    later(grownIn + rand(4, 12), () => startShower());
+    later(grownIn + rand(3, 8), scheduleGusts);
+  }
+  // ---- showers
+  // Adaptive quality: if frames drop while it rains (slow GPU / software compositing), two thirds of the
+  // fluttering leaves are temporarily painted into the tree image (fewer layers to composite) until it clears.
+  let probeOn = false, calmed = [], fireOn = false;
+  function fire(on){                                  // something is burning: same adaptive leaf-layer reduction as in rain
+    if (on === fireOn) return; fireOn = on;
+    if (on) { if (params.get('adaptive') !== 'off') probe(); }
+    else later(3, () => { if (!showerOn && !fireOn) uncalm(); });
+  }
+  function probe(){
+    if (probeOn) return; probeOn = true;
+    let n = 0, t0 = 0;
+    const f = ms => {
+      if (!(showerOn || fireOn) || calmed.length || document.hidden) { probeOn = false; return; }
+      if (!t0) t0 = ms; n++;
+      if (ms - t0 > win) { if (n / ((ms - t0) / 1000) < (showerOn ? 48 : 54)) calm(); n = 0; t0 = ms; }
+      requestAnimationFrame(f);
+    };
+    const win = showerOn ? 1500 : 800;
+    later(showerOn ? 1.5 : .2, () => requestAnimationFrame(f));          // let the shower start first
+  }
+  function calm(){
+    for (const tr of trees) {
+      if (!tr.base || tr.fire) continue;
+      const ctx = tr.layers[0];
+      tr.fl.forEach((l, j) => {
+        if (j % 3 === 0 || !l.el || l.el.classList.contains('gone') || l.el.style.display === 'none') return;
+        drawLeaf(ctx, l, 1, tr.ox, tr.oy); l.el.style.display = 'none'; calmed.push(l);
+      });
+    }
+  }
+  function uncalm(){
+    if (!calmed.length) return;
+    for (const tr of trees) if (tr.base && !tr.fire) { const c = tr.layers[0]; c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, c.canvas.width, c.canvas.height); c.drawImage(tr.base, 0, 0); }
+    for (const l of calmed) if (l.el) l.el.style.display = '';
+    calmed = [];
+  }
+  function startShower(dur){
+    if (!enabled()) return;
+    clearTimeout(showerTimer); showerOn = true;
+    const k = rand(.6, 1);
+    setRain(k);
+    windBase = rand(-.15, .15); engine.post({ type: 'wind', v: windBase }); engine.post({ type: 'rain', v: k });
+    wet.style.transitionDuration = '7s'; wet.style.opacity = (.55 + k * .45).toFixed(2);
+    showerTimer = later(dur || rand(20, 40), endShower);
+    if (params.get('adaptive') !== 'off') probe();
+  }
+  function endShower(){
+    clearTimeout(showerTimer); showerOn = false; windBase = 0; setRain(0);
+    engine.post({ type: 'rain', v: 0 }); engine.post({ type: 'wind', v: 0 });
+    wet.style.transitionDuration = '25s'; wet.style.opacity = '0';         // concrete dries slowly
+    later(7, () => { if (!showerOn && !fireOn) uncalm(); });
+    later(rand(25, 60), () => startShower());
+  }
+  // ---- gusts
+  function scheduleGusts(){
+    if (!enabled()) return;
+    startGust();
+    later((showerOn ? 6 : 9) + rand(0, 12), scheduleGusts);
+  }
+  function makeGust(strength){
+    const g = { t0: performance.now() / 1000, dir: Math.random() < .6 ? 1 : -1, s: strength || rand(.45, 1), rise: .7, hold: rand(.8, 2.4), fall: rand(1.6, 2.8) };
+    g.len = g.rise + g.hold + g.fall; g.ph = rand(0, 6.28);
+    g.env = u => u < 0 ? 0 : u < g.rise ? Math.sin(u / g.rise * Math.PI / 2) ** 2 : u < g.rise + g.hold ? 1 :
+                 u < g.len ? .5 + .5 * Math.cos((u - g.rise - g.hold) / g.fall * Math.PI) : 0;
+    g.wind = u => windBase + g.dir * g.s * g.env(u) * (1 + .22 * Math.sin(u * 6.3 + g.ph) + .12 * Math.sin(u * 13.7));
+    return g;
+  }
+  function startGust(strength){
+    if (!enabled()) return;
+    const g = gust = makeGust(strength);
+    const now = performance.now() / 1000;
+    // trees: simulate a damped spring once, then play it back as a compositor animation
+    for (const tr of trees) {
+      if (tr.fire) continue;                             // burning / charred trees stand stiff
+      let b = 0, v = 0;
+      if (tr.traj) { const u = (now - tr.traj.t0) / tr.traj.dt, i = Math.min(tr.traj.b.length - 1, Math.floor(u)); if (i >= 0 && u < tr.traj.b.length) { b = tr.traj.b[i]; v = tr.traj.v[i]; } }
+      const lag = (g.dir > 0 ? tr.x / W : 1 - tr.x / W) * .35, dt = 1 / 60, T = g.len + lag + 3.5;
+      const bs = [], vs = [], kf = [];
+      for (let i = 0, n = Math.ceil(T / dt); i <= n; i++) {
+        const u = i * dt, e = g.env(u - lag);
+        const target = (g.dir * g.s * e * (1 + .2 * Math.sin(u * 5.1 + tr.x)) + windBase * .3) * 7 * tr.flex;
+        v += ((target - b) * 16 - v * 3.2) * dt; b += v * dt; bs.push(b); vs.push(v);
+        if (i % 2 === 0 || i === n) kf.push({ offset: Math.min(1, u / T), transform: `rotate(${(b * .8).toFixed(3)}deg)` });
+      }
+      kf[kf.length - 1].offset = 1;
+      tr.traj = { t0: now, dt, b: bs, v: vs };
+      if (tr.gustAnim) tr.gustAnim.cancel();
+      tr.gustAnim = tr.gel.animate(kf, { duration: T * 1000, easing: 'linear' });
+    }
+    for (const p of plants) {                           // grass and bushes bend with it (compositor animation on the wrapper)
+      if (p.state) continue;
+      const a = g.dir * g.s * (p.kind === 'g' ? R(9, 14) : R(3, 5)), T = g.len + 1.2;
+      p.el.animate([{ transform: 'rotate(0deg)' }, { transform: `rotate(${a.toFixed(2)}deg)`, offset: g.rise / T },
+                    { transform: `rotate(${(a * .75).toFixed(2)}deg)`, offset: (g.rise + g.hold) / T }, { transform: `rotate(${(-a * .12).toFixed(2)}deg)`, offset: Math.min(.97, (g.len + .4) / T) },
+                    { transform: 'rotate(0deg)' }], { duration: T * 1000, easing: 'ease-in-out' });
+    }
+    engine.post({ type: 'gust', g: { dir: g.dir, s: g.s, rise: g.rise, hold: g.hold, fall: g.fall, ph: g.ph } });   // rain slants with it
+    // leaves flutter harder while it blows
+    setLeafRate(2.6);
+    later(g.rise + g.hold, () => setLeafRate(1.7));
+    later(g.len, () => { if (gust === g) setLeafRate(1); });
+    // blow a few leaves off
+    if (FREEZE == null) { const n = Math.round(g.s * rand(2, 6)); for (let i = 0; i < n; i++) later(g.rise * .8 + rand(0, g.hold + .5), () => blowLeaf(g)); }
+  }
+  let lastRate = 1;
+  function setLeafRate(r){
+    if (r === lastRate) return; lastRate = r;
+    for (const tr of trees) for (const a of tr.el.getAnimations({ subtree: true })) if (a.animationName && a.animationName[0] === 'f') a.updatePlaybackRate(r);
+  }
+  // ---- a leaf blown off the tree: physics simulated up front, played back by the compositor
+  function blowLeaf(g){
+    const pool = [];
+    for (const tr of trees) for (const lw of tr.el.querySelectorAll('.lw:not(.gone)')) if (lw.style.display !== 'none') pool.push(lw);
+    if (!pool.length) return;
+    const lw = pool[(Math.random() * pool.length) | 0], src = lw.firstChild, r = lw.getBoundingClientRect();
+    lw.classList.add('gone'); lw.style.opacity = '0';
+    later(rand(35, 85), () => { lw.classList.remove('gone'); lw.style.opacity = ''; });   // slowly regrows
+    const c = mkCanvas(src.width, src.height); c.getContext('2d').drawImage(src, 0, 0);
+    const w = src.width / DPR, h = src.height / DPR;
+    c.className = 'fall'; c.style.width = w + 'px'; c.style.height = h + 'px';
+    let x = r.left + r.width / 2 - w / 2, y = r.top + r.height / 2 - h / 2, vx = 0, vy = rand(-50, -20), a = rand(0, 6.28);
+    const va = rand(-3, 3), fr = rand(2, 4.5), ph0 = rand(0, 6.28), floor = groundY - h * .55 + rand(0, 5);
+    const u0 = performance.now() / 1000 - g.t0, dt = 1 / 30, kf = [];
+    let t = 0, landed = false, ph = ph0;
+    while (t < 14) {
+      const wnd = g.wind(u0 + t);
+      vx += (wnd * 320 - vx) * dt * 1.4; vy += (70 - vy) * dt * 1.2; ph += fr * dt; a += va * dt;
+      x += (vx + Math.sin(ph) * 45) * dt; y += vy * dt; t += dt;
+      if (y >= floor && x > -40 && x < W + 10) { y = floor; landed = true; }
+      kf.push({ t, transform: `translate(${x.toFixed(1)}px,${y.toFixed(1)}px) rotate(${a.toFixed(3)}rad) scaleX(${Math.cos(ph * 1.3).toFixed(3)})` });
+      if (landed || x < -120 || x > W + 120) break;
+    }
+    kf.forEach(k => { k.offset = k.t / t; delete k.t; }); kf[0].offset = 0; kf[kf.length - 1].offset = 1;
+    c.style.transform = kf[0].transform; stage.appendChild(c);
+    const an = c.animate(kf, { duration: t * 1000, easing: 'linear', fill: 'forwards' });
+    an.onfinish = () => {
+      if (!c.isConnected) return;
+      if (!landed) { c.remove(); return; }
+      an.cancel();
+      c.style.transform = `translate(${x.toFixed(1)}px,${floor.toFixed(1)}px) rotate(${(Math.random() < .5 ? 1 : -1) * rand(75, 100)}deg) scale(.9,.55)`;
+      fallen.push(c);
+      const fade = el => { el.style.opacity = '0'; setTimeout(() => el.remove(), 3200); };
+      while (fallen.length > 24) fade(fallen.shift());                    // cap leaves lying on the concrete
+      later(rand(25, 50), () => { const i = fallen.indexOf(c); if (i >= 0) { fallen.splice(i, 1); fade(c); } });
+    };
+  }
+  addEventListener('keydown', e => {
+    if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    const k = e.key.toLowerCase();
+    if (k === 'w') startGust(rand(.75, 1));
+    if (k === 'r') { if (showerOn) endShower(); else startShower(); }
+  });
+  // what the fire needs to know: current wind (-1..1-ish) and rain level (0..1), mirroring the rain worker's easing
+  let rFrom = 0, rTo = 0, rT0 = 0;
+  function rainLevel(){ const u = performance.now() / 1000 - rT0, k = rTo > rFrom ? .35 : .3; return rTo + (rFrom - rTo) * Math.exp(-k * u); }
+  function setRain(v){ rFrom = rainLevel(); rTo = v; rT0 = performance.now() / 1000; }
+  function wind(){ if (!gust) return windBase; const u = performance.now() / 1000 - gust.t0; return u > gust.len ? windBase : gust.wind(u); }
+  return { attach, startShower, startGust, endShower, wind, rainLevel, fire };
+})();
+
+// ---------- fire: click a tree to burn it ----------
+// Burning parts crossfade to pre-baked charred sprites on a small per-tree "active" canvas; the tree's static canvas is
+// re-baked a few times a second (and once at the end), so a charred tree costs nothing afterwards.
+// Flames / sparks / smoke / steam are pooled particles drawn from pre-rendered sprites on a half-res canvas per burning tree.
+const Fire = (() => {
+  const DBG = params.get('dbg') || '';
+  const FS = .4, SPEED = 62;                       // fire canvas resolution; spread speed (css px / s at scale 1)
+  let SPR = null, burning = [], raf = 0, last = 0, clock = 0, budget = 1, fpsN = 0, fpsT = 0;
+  const pool = [];
+  const rand = (a, b) => a + (b - a) * Math.random();
+  const leafBCache = new Map(), emberCache = new WeakMap();
+  function stagesOf(e){                               // shared per leaf sprite, per branch for sticks
+    const o = e.o, key = e.kind ? o.pre : o;
+    let v = emberCache.get(key);
+    if (!v) {
+      const tint = (src, a) => emberize(src, 'rgba(255,' + (95 + 40 * (1 - a) | 0) + ',20,' + a + ')');
+      v = [tint(o.pre, .22), tint(o.pre, .48), tint(o.preB, .5), tint(o.preB, .25), o.preB];
+      emberCache.set(key, v);
+    }
+    return v;
+  }
+
+  function sprites(){
+    const radial = (size, stops) => { const c = mkCanvas(size, size), x = c.getContext('2d'), g = x.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+      stops.forEach(([o, col]) => g.addColorStop(o, col)); x.fillStyle = g; x.fillRect(0, 0, size, size); return c; };
+    const tear = stops => { const c = mkCanvas(64, 140), x = c.getContext('2d'); x.translate(32, 88); x.scale(1, 1.9);
+      const g = x.createRadialGradient(0, 0, 0, 0, 0, 31); stops.forEach(([o, col]) => g.addColorStop(o, col)); x.fillStyle = g; x.fillRect(-32, -50, 64, 80); return c; };
+    return {
+      flame: [
+        tear([[0, 'rgba(255,252,230,1)'], [.3, 'rgba(255,225,130,.85)'], [.65, 'rgba(255,170,50,.3)'], [1, 'rgba(255,140,30,0)']]),   // white-yellow core
+        tear([[0, 'rgba(255,190,70,.95)'], [.4, 'rgba(255,125,20,.6)'], [1, 'rgba(240,90,10,0)']]),                                   // orange
+        tear([[0, 'rgba(235,80,20,.8)'], [.45, 'rgba(190,45,12,.4)'], [1, 'rgba(150,30,10,0)']]),                                     // red
+        tear([[0, 'rgba(90,30,15,.45)'], [.5, 'rgba(60,25,15,.2)'], [1, 'rgba(40,20,15,0)']]) ],                                       // dark tip
+      spark: radial(16, [[0, 'rgba(255,250,210,1)'], [.35, 'rgba(255,190,70,.9)'], [1, 'rgba(255,110,20,0)']]),
+      smoke: radial(64, [[0, 'rgba(85,82,80,.55)'], [.5, 'rgba(95,92,90,.25)'], [1, 'rgba(110,108,105,0)']]),
+      steam: radial(64, [[0, 'rgba(226,229,233,.8)'], [.5, 'rgba(206,211,217,.7)'], [.78, 'rgba(172,179,188,.32)'], [1, 'rgba(180,186,194,0)']]),
+      glow: radial(128, [[0, 'rgba(255,150,50,.55)'], [.5, 'rgba(255,120,30,.18)'], [1, 'rgba(255,100,20,0)']]),
+    };
+  }
+  const emberize = (src, col) => { const c = mkCanvas(src.width, src.height), x = c.getContext('2d'); x.drawImage(src, 0, 0);
+    x.globalCompositeOperation = 'source-atop'; x.fillStyle = col; x.fillRect(0, 0, c.width, c.height); return c; };
+  function leafB(li, hPx){
+    const hb = Math.max(6, Math.round(hPx / 4) * 4), key = li + '_' + hb;
+    let v = leafBCache.get(key);
+    if (!v) { const src = IMG.burntLeaves[li], w = hb * src.width / src.height, c = mkCanvas(w, hb);
+      c.getContext('2d').drawImage(src, 0, 0, c.width, c.height); v = c; leafBCache.set(key, v); }
+    return v;
+  }
+  function ensureBurnt(e){
+    const o = e.o;
+    if (o.preB) return;
+    if (e.kind === 0) o.preB = preStick(IMG.burnt.get(o.img) || o.img, o.w * o.k, o.len * o.k, o.flip, false);
+    else o.preB = leafB(o.li, 55 * o.size * o.k);
+  }
+
+  // ---- geometry helpers (screen css px)
+  function screenOf(tr, ux, uy){ return [tr.left + (ux * tr.kp + tr.ox) / DPR, tr.top + (uy * tr.kp + tr.oy) / DPR]; }
+  function hitTree(x, y){
+    for (const tr of trees) {
+      if (!tr.swaying && !tr.fire) continue;          // still growing
+      if (hitOne(tr, x, y)) return tr;
+    }
+    return null;
+  }
+  function hitOne(tr, x, y){
+    {
+      if (x < tr.left || x > tr.left + tr.wCss || y < tr.top || y > groundY + 4) return false;
+      for (const b of tr.branches) {
+        const [x0, y0] = screenOf(tr, b.x, b.y), [x1, y1] = screenOf(tr, b.x + Math.sin(b.ang) * b.len, b.y - Math.cos(b.ang) * b.len);
+        const dx = x1 - x0, dy = y1 - y0, L2 = dx * dx + dy * dy || 1, u = clamp01(((x - x0) * dx + (y - y0) * dy) / L2);
+        if (Math.hypot(x - (x0 + u * dx), y - (y0 + u * dy)) < b.w * tr.kp / DPR / 2 + 7) return true;
+      }
+      for (const l of tr.leaves) {
+        const h = l.pre.height / DPR, [ax, ay] = screenOf(tr, l.x, l.y);
+        if (Math.hypot(x - (ax + Math.sin(l.ang) * h / 2), y - (ay - Math.cos(l.ang) * h / 2)) < h * .55) return true;
+      }
+    }
+    return false;
+  }
+
+  // ---- ignition
+  function setup(tr){
+    const F = tr.fire = { els: [], ptr: 0, live: [], parts: [], fc: 0, lastStatic: -1, dirtyStatic: true, rootsDone: false, done: false, glow: 0, spread: [], dirty: null, cnt: [0, 0, 0, 0, 0, 0], cap: CAP.slice() };
+    tr.el.classList.remove('sway');
+    if (tr.gustAnim) { tr.gustAnim.cancel(); tr.gustAnim = null; }
+    tr.gel.style.transform = '';
+    for (const l of tr.leaves) { l.gone = !!(l.el && l.el.classList.contains('gone')); if (l.el) { l.el.remove(); l.el = null; } }
+    if (tr.layers[3] && tr.layers[3].canvas.isConnected) tr.layers[3].canvas.remove();
+    const base = tr.layers[0].canvas;
+    const ac = mkCanvas(base.width, base.height); ac.style.width = base.style.width; ac.style.height = base.style.height;
+    tr.el.appendChild(ac); F.act = ac.getContext('2d');
+    F.fl = Math.max(0, Math.floor(tr.left - 150)); F.fr = Math.min(W, Math.ceil(tr.left + tr.wCss + 150));
+    F.ft = Math.max(0, Math.floor(tr.top - 280)); F.fb = Math.min(H, Math.ceil(groundY + 80));        // only the column around the tree
+    const fc = mkCanvas((F.fr - F.fl) * FS, (F.fb - F.ft) * FS); fc.className = 'firecv';
+    Object.assign(fc.style, { position: 'absolute', left: F.fl + 'px', top: F.ft + 'px', width: (F.fr - F.fl) + 'px', height: (F.fb - F.ft) + 'px', pointerEvents: 'none' });
+    stage.appendChild(fc); F.ctx = fc.getContext('2d'); F.cv = fc;
+    for (const b of tr.branches) {
+      const [x0, y0] = screenOf(tr, b.x, b.y), [x1, y1] = screenOf(tr, b.x + Math.sin(b.ang) * b.len, b.y - Math.cos(b.ang) * b.len);
+      F.els.push(b.fe = { kind: 0, o: b, state: 0, d: 1e9, x0, y0, x1, y1, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, wc: b.w * tr.kp / DPR });
+    }
+    for (const l of tr.leaves) {
+      const h = l.pre.height / DPR, [ax, ay] = screenOf(tr, l.x, l.y);
+      F.els.push(l.fe = { kind: 1, o: l, state: l.gone ? 3 : 0, d: 1e9, cx: ax + Math.sin(l.ang) * h / 2, cy: ay - Math.cos(l.ang) * h / 2, h, falls: Math.random() < .45 });
+    }
+    F.trunk = tr.branches[0].fe;
+    // maybe jump to a close neighbour later (canopies nearly touching)
+    for (const t2 of trees) {
+      if (t2 === tr || (!t2.swaying && !t2.fire)) continue;
+      const gap = Math.max(t2.left - (tr.left + tr.wCss), tr.left - (t2.left + t2.wCss));
+      if (gap < 90 && Math.random() < .45 && params.get('spread') !== 'off') F.spread.push({ t2, toRight: t2.left > tr.left });
+    }
+    staticRedraw(tr);
+  }
+  function ignite(tr, x, y){
+    if (!SPR) SPR = sprites();
+    if (!tr.swaying && !tr.fire) return false;          // still growing
+    if (!tr.fire) setup(tr);
+    const F = tr.fire;
+    if (F.done && F.els.every(e => e.state !== 0 && e.state !== 4)) return false;   // nothing left to burn
+    F.done = false;
+    const sp = SPEED * Math.max(.5, tr.k);
+    for (const e of F.els) {
+      if (e.state !== 0 && e.state !== 4) continue;
+      const dx = e.cx - x, up = y - e.cy, eff = Math.hypot(dx, up >= 0 ? up * .55 : up * 1.8);
+      const d = F.fc + eff / sp * rand(.85, 1.15);
+      if (e.state === 4) e.state = 0;              // doused bits can be relit
+      e.d = Math.min(e.d, d);
+    }
+    F.els.sort((a, b) => a.d - b.d); F.ptr = 0;
+    while (F.ptr < F.els.length && F.els[F.ptr].state !== 0) F.ptr++;
+    for (const s of F.spread) if (s.d == null) {
+      const side = F.els.filter(e => e.kind === 1 && e.state === 0).sort((a, b) => s.toRight ? b.cx - a.cx : a.cx - b.cx)[0];
+      if (side) s.d = side.d + 1.2;
+    }
+    if (!burning.includes(tr)) burning.push(tr);
+    if (Weather.rainLevel() > .2) for (let i = 0; i < 3; i++) gSpawn(3, x + rand(-10, 10), y - rand(0, 10), rand(24, 36), rand(1.5, 2.5), 0, rand(-70, -40));   // fizzle
+    Weather.fire(true); run();
+    return true;
+  }
+  function click(x, y){
+    const tr = hitTree(x, y); if (tr) return ignite(tr, x, y);
+    const p = plants.find(q => q.state === 0 && Math.abs(x - q.x) < q.w * .45 && y < groundY + 4 && y > groundY - q.h);
+    if (p) { igniteP(p, 0); return true; }
+    return false;
+  }
+  function igniteAll(){
+    for (const tr of trees) {
+      if (!tr.swaying && !tr.fire) continue;
+      const b = tr.branches[0], [x, y] = screenOf(tr, b.x + Math.sin(b.ang) * b.len * .2, b.y - Math.cos(b.ang) * b.len * .2);
+      ignite(tr, x, y);
+    }
+  }
+
+  // ---- static (cached) tree layer: unburnt parts normal, finished parts charred, burning parts left to the active layer
+  function staticRedraw(tr){
+    const F = tr.fire, c = tr.layers[0];
+    c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, c.canvas.width, c.canvas.height);
+    for (const b of tr.branches) {
+      const st = b.fe.state; b.fe.baked = st; if (st === 1) continue;
+      if (st === 2) { const p = b.pre; b.pre = b.preB; drawStick(c, b, 0, 0, 1, tr.ox, tr.oy); b.pre = p; } else drawStick(c, b, 0, 0, 1, tr.ox, tr.oy);
+    }
+    for (const l of tr.leaves) {
+      const st = l.fe.state; l.fe.baked = st; if (st === 1 || st === 3) continue;
+      if (st === 2) { const p = l.pre; l.pre = l.preB; drawLeaf(c, l, .9, tr.ox, tr.oy); l.pre = p; } else drawLeaf(c, l, 1, tr.ox, tr.oy);
+    }
+    F.dirtyStatic = false; F.lastStatic = clock;
+  }
+  function charRoots(tr){
+    const s = slab && slab.spots.find(sp => sp.tr === tr); if (!s) return;
+    for (const r of s.roots) r.pre = preStick(IMG.burnt.get(r.img) || r.img, r.w * DPR, r.len * DPR, r.fl, r.gen);
+    drawSpot(s, 1e9, 1);
+  }
+
+  // ---- particles
+  function spawn(F, type, x, y, size, life, vx, vy, extra){
+    if (F.cnt[type] >= F.cap[type]) return;           // capped per type, caps follow the measured frame rate
+    F.cnt[type]++;
+    const p = pool.pop() || {};
+    p.type = type; p.x = x; p.y = y; p.size = size; p.life = life; p.age = 0; p.vx = vx; p.vy = vy; p.seed = Math.random() * 100;
+    p.img = extra || null; p.rot = Math.random() * 6.28; p.vr = (Math.random() - .5) * 4; p.landed = false;
+    F.parts.push(p);
+  }
+  const CAP = [170, 60, 55, 60, 40, 40];
+  function step(tr, dt){
+    const F = tr.fire, wind = Weather.wind(), rain = Weather.rainLevel();
+    const fan = 1 + .8 * Math.abs(wind), wet = 1 - .65 * Math.min(1, rain), soak = clamp01((rain - .15) / .3);
+    F.fc += dt * fan * wet;
+    if (soak > .6) for (; F.ptr < F.els.length; F.ptr++) { const e = F.els[F.ptr]; if (e.state === 0) e.state = 4; }   // downpour: nothing new catches
+    // the front reaches new parts
+    while (F.ptr < F.els.length && F.els[F.ptr].d <= F.fc) {
+      const e = F.els[F.ptr++];
+      if (e.state !== 0) continue;
+      if (rain > .15 && Math.random() < Math.max(rain * .7, soak)) {   // rain douses it before it catches: a hiss of steam
+        e.state = 4; if (Math.random() < .3) spawn(F, 3, e.cx, e.cy - 4, rand(14, 22), rand(1.2, 2), Weather.wind() * 50, rand(-60, -35)); continue; }
+      ensureBurnt(e); e.state = 1; e.t = clock;
+      if (e === F.trunk) for (const q of plants) if (q.state === 0 && Math.abs(q.x - e.x0) < q.w / 2 + 130 * Math.max(.6, tr.k)) igniteP(q, rand(.6, 2.2));   // ground fire
+      const short = 1 - .45 * Math.min(1, rain);
+      if (e.kind === 0) { e.tu = rand(1.4, 2.2); e.flame = rand(2.4, 3.8) * (.75 + Math.min(1.2, e.wc / 18)) * short; e.sm = e.flame + rand(4, 10);
+        e.embers = e.wc > 2.5 ? Array.from({ length: e.wc > 8 ? 3 : 1 }, () => [Math.random(), Math.random() * 6.28]) : []; }
+      else { e.tu = rand(.6, .9); e.flame = rand(1, 1.6) * short; e.sm = e.flame + 1.5; }
+      F.live.push(e);
+    }
+    for (const s of F.spread) if (s.d != null && !s.fired && F.fc >= s.d && soak < .3) {
+      s.fired = true;
+      const t2 = s.t2, cand = t2.leaves.filter(l => !t2.fire || l.fe.state === 0);
+      if (cand.length) { const l = cand.sort((a, b) => s.toRight ? a.x - b.x : b.x - a.x)[0], [x, y] = screenOf(t2, l.x, l.y); ignite(t2, x, y); }
+    }
+    // burning / smouldering parts: transitions, emitters
+    const act = F.act; let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9, glow = 0;
+    if (F.dirty) { act.setTransform(1, 0, 0, 1, 0, 0); const d = F.dirty; act.clearRect(d[0], d[1], d[2] - d[0], d[3] - d[1]); F.dirty = null; }
+    const cnt = F.cnt = [0, 0, 0, 0, 0, 0], sh = budget / Math.sqrt(burning.length), big = 1.3 + .5 * (1 - budget);
+    for (const p of F.parts) cnt[p.type]++;
+    F.cap = CAP.map((c, i) => Math.max(i === 4 ? 10 : 4, c * sh | 0));
+    const mul = wet * (1 + .4 * Math.abs(wind)) * budget, hot = [];
+    for (let i = F.live.length - 1; i >= 0; i--) {
+      const e = F.live[i], a = clock - e.t, o = e.o;
+      if (soak > .3 && !e.wetted) {                     // rain reaches it: flames die within a few seconds, charred parts stay
+        e.wetted = true;
+        if (a < e.flame * 1.3) { e.flame = Math.max(.05, Math.min(e.flame, a + rand(.3, 2.2) * (1.25 - soak))); if (Math.random() < .55) { const px = e.kind ? e.cx : e.x0 + (e.x1 - e.x0) * Math.random(), py = e.kind ? e.cy : e.y0 + (e.y1 - e.y0) * Math.random(); spawn(F, 3, px, py - 4, rand(24, 38), rand(2.2, 3.5), wind * 50, rand(-90, -60)); } }
+        e.sm = Math.min(e.sm, e.flame * 1.3 + rand(.5, 1.5));
+      }
+      const I = a < .4 ? a / .4 : a < e.flame ? 1 : a < e.flame * 1.3 ? 1 - (a - e.flame) / (e.flame * .3) : 0;
+      glow += I * (e.kind ? .3 : 1 + e.wc / 10);
+      if (I > .3) hot.push(e);
+      if (e.state === 2 && e.baked !== 2) {             // finished, not yet in the static layer: keep drawing it charred
+        const pre = e.o.pre; e.o.pre = e.o.preB;
+        e.kind ? drawLeaf(act, e.o, .9, tr.ox, tr.oy) : drawStick(act, e.o, 0, 0, 1, tr.ox, tr.oy); e.o.pre = pre;
+        const cx = e.o.x * e.o.k + tr.ox, cy = e.o.y * e.o.k + tr.oy, r = Math.max(pre.width, pre.height) * 1.2 + 2;
+        if (cx - r < x0) x0 = cx - r; if (cy - r < y0) y0 = cy - r; if (cx + r > x1) x1 = cx + r; if (cy + r > y1) y1 = cy + r;
+      }
+      if (e.state === 1) {
+        const u = a / e.tu;
+        if (u >= 1) {
+          if (e.kind === 1 && e.falls && F.cnt[4] < F.cap[4]) {
+            e.state = 3;
+            spawn(F, 4, e.cx, e.cy, e.h * .9, 60, 0, rand(-10, 10), o.preB); F.urgent = true;
+          } else e.state = 2;
+          F.dirtyStatic = true;
+          if (e === F.trunk && !F.rootsDone) { F.rootsDone = true; charRoots(tr); }
+        } else {
+          // crossfade normal -> glowing -> charred on the active layer
+          // one draw per part per frame: pre-baked steps normal -> glowing -> charred (canvas raster pays per pixel)
+          const pre = o.pre, st = stagesOf(e);
+          o.pre = st[Math.min(st.length - 1, u * st.length | 0)];
+          if (!DBG.includes('noact')) e.kind ? drawLeaf(act, o, 1 - .1 * u, tr.ox, tr.oy) : drawStick(act, o, 0, 0, 1, tr.ox, tr.oy);
+          o.pre = pre;
+          const cx = o.x * o.k + tr.ox, cy = o.y * o.k + tr.oy, r = Math.max(o.pre.width, o.pre.height) * 1.2 + 2;
+          if (cx - r < x0) x0 = cx - r; if (cy - r < y0) y0 = cy - r; if (cx + r > x1) x1 = cx + r; if (cy + r > y1) y1 = cy + r;
+        }
+      }
+      // emitters
+      const em = (rate, fn) => { let n = rate * dt; while (n > 0) { if (n >= 1 || Math.random() < n) fn(); n--; } };
+      const pt = () => { if (e.kind) return [e.cx + rand(-3, 3), e.cy + rand(-4, 4)]; const f = Math.random(); return [e.x0 + (e.x1 - e.x0) * f + rand(-1, 1) * e.wc * .4, e.y0 + (e.y1 - e.y0) * f]; };
+      if (I > 0) {
+        em((e.kind ? 9 : 11 + e.wc * 2) * I * mul, () => { const [x, y] = pt(); spawn(F, 0, x, y, (e.kind ? rand(12, 21) : rand(10, 15) + e.wc * 1.5) * big * (1 - .4 * Math.min(1, rain)) * Math.max(.6, tr.k), rand(.4, .85), wind * 60, rand(-70, -30)); });
+        em(1.6 * I * budget, () => { const [x, y] = pt(); spawn(F, 1, x, y, rand(2.5, 4.5), rand(1, 2.4), rand(-30, 30) + wind * 80, rand(-140, -60)); });
+        em((e.kind ? .6 : 1.4) * I * budget, () => { const [x, y] = pt(); spawn(F, 2, x, y - 10, rand(18, 28), rand(4, 6), wind * 40, rand(-70, -45)); });
+        if (rain > .15) em(10 * rain * I * budget, () => { const [x, y] = pt(); spawn(F, 3, x, y - 6, rand(26, 40), rand(3, 4.5), wind * 50, rand(-120, -85)); });
+        if (e.kind === 1) em(1.5 * I * budget, () => spawn(F, 5, e.cx, e.cy, rand(1.2, 2.2), rand(2.5, 4.5), rand(-15, 15), rand(10, 30)));
+      } else if (a < e.sm) {
+        em(.35 * budget, () => { const [x, y] = pt(); spawn(F, 1, x, y, rand(2, 3.5), rand(.8, 1.6), rand(-15, 15) + wind * 60, rand(-60, -30)); });
+        em(.5 * budget * (1 - a / e.sm), () => { const [x, y] = pt(); spawn(F, 2, x, y - 4, rand(8, 14), rand(3, 5), wind * 30, rand(-45, -28)); });
+      }
+      if (e.state !== 1 && a >= e.sm && e.baked === e.state) F.live.splice(i, 1);
+    }
+    // wind carries glowing embers off the burning parts; they can light whatever they land on
+    if (hot.length && Math.abs(wind) > .25 && rain < .2) emEmbers(hot, dt, wind, F.glow, e => { if (e.kind) return [e.cx, e.cy]; const f = Math.random(); return [e.x0 + (e.x1 - e.x0) * f, e.y0 + (e.y1 - e.y0) * f]; });
+    if (F.dirtyStatic && clock - F.lastStatic > (F.urgent ? .15 : .5) && !DBG.includes('nostatic')) { staticRedraw(tr); F.urgent = false; }
+    F.glow += (Math.min(1, glow / 18) - F.glow) * Math.min(1, dt * 3);
+    // particles update + draw
+    const c = F.ctx; c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, c.canvas.width, c.canvas.height);
+    c.setTransform(FS, 0, 0, FS, -F.fl * FS, -F.ft * FS);
+    if (F.glow > .01) {                                  // warm light on the concrete and trunk
+      const g = SPR.glow, b = F.trunk, gw = 320 * Math.max(.6, tr.k), gh = 140 * Math.max(.6, tr.k);
+      c.globalAlpha = F.glow * .8; c.drawImage(g, b.x0 - gw / 2, groundY - gh * .5, gw, gh);
+      c.globalAlpha = F.glow * .5; c.drawImage(g, b.cx - gw * .4, b.cy - gh * .8, gw * .8, gh * 1.6); c.globalAlpha = 1;
+    }
+    const P = DBG.includes('noparts') ? [] : F.parts;
+    // smoke / steam / ash / falling leaves (normal blending)
+    for (let i = P.length - 1; i >= 0; i--) {
+      const p = P[i]; p.age += dt;
+      if (p.age >= p.life || p.y < F.ft - 20 || p.x < F.fl - 40 || p.x > F.fr + 40) { P[i] = P[P.length - 1]; P.pop(); pool.push(p); continue; }
+      const f = p.age / p.life; p.ef = clamp01((p.y - F.ft - 10) / 90);
+      if (p.type === 0) { p.vy -= 45 * dt; p.vx += (wind * 110 - p.vx) * dt * 2; p.x += p.vx * dt + Math.sin(p.age * 9 + p.seed) * 22 * dt; p.y += p.vy * dt; }
+      else if (p.type === 1) { p.vy -= 15 * dt; p.vx += ((Math.random() - .5) * 260 + (wind * 90 - p.vx) * 2) * dt; p.x += p.vx * dt; p.y += p.vy * dt; }
+      else if (p.type === 2 || p.type === 3) { p.vx += (wind * 70 - p.vx) * dt * .8; p.x += (p.vx + Math.sin(p.age * 1.3 + p.seed) * 8) * dt; p.y += p.vy * dt; }
+      else if (p.type === 4) {
+        if (!p.landed) { p.vy += (48 - p.vy) * dt * 1.5; p.vx += (wind * 130 + Math.sin(p.age * 3 + p.seed) * 40 - p.vx) * dt * 1.5; p.x += p.vx * dt; p.y += p.vy * dt; p.rot += p.vr * dt;
+          if (p.y >= groundY - 3) { p.landed = true; p.y = groundY - 3; p.rot = Math.PI / 2 * (Math.random() < .5 ? 1 : -1) + rand(-.3, .3); p.life = p.age + rand(2, 3.5);
+            for (const q of plants) if (q.state === 0 && Math.abs(p.x - q.x) < q.w * .5 && Math.random() < .5) { igniteP(q, .3); break; } }
+          if (Math.random() < dt * 3) spawn(F, 1, p.x, p.y, rand(2, 3), rand(.5, 1.1), rand(-20, 20), rand(-60, -20)); }
+      } else { p.vx += (wind * 60 - p.vx) * dt; p.x += (p.vx + Math.sin(p.age * 2 + p.seed) * 12) * dt; p.y += p.vy * dt; if (p.y > groundY) p.y = groundY; }
+      if (p.type === 2) { const s = p.size * (1 + 2.6 * f); c.globalAlpha = .32 * p.ef * Math.sin(Math.PI * f) ** .7; c.drawImage(SPR.smoke, p.x - s / 2, p.y - s / 2, s, s); }
+      else if (p.type === 3) { const s = p.size * (1 + 2.4 * f); c.globalAlpha = .75 * p.ef * Math.sin(Math.PI * Math.min(1, f * 1.25 + .1)) ** .8; c.drawImage(SPR.steam, p.x - s / 2, p.y - s / 2, s, s); }
+      else if (p.type === 5) { c.globalAlpha = .7 * (1 - f); c.fillStyle = '#5a5552'; c.fillRect(p.x, p.y, p.size, p.size); }
+      else if (p.type === 4) {                          // falling charred leaf: drawn crisp on the tree's full-res active layer
+        const img = p.img, cs = Math.cos(p.rot), sn = Math.sin(p.rot), px = (p.x - tr.left) * DPR, py = (p.y - tr.top) * DPR, r = img.height * .6 + 2;
+        act.globalAlpha = p.landed ? clamp01((p.life - p.age) / 1.5) : 1;
+        act.setTransform(cs * .9, sn * .9, -sn * .9, cs * .9, px, py); act.drawImage(img, -img.width / 2, -img.height / 2);
+        if (px - r < x0) x0 = px - r; if (py - r < y0) y0 = py - r; if (px + r > x1) x1 = px + r; if (py + r > y1) y1 = py + r;
+      }
+    }
+    // flames (dark/red/orange with normal blending, then additive white-yellow cores) and sparks
+    for (const pass of [0, 1]) {
+      c.globalCompositeOperation = pass ? 'lighter' : 'source-over';
+      for (const p of P) {
+        const f = p.age / p.life;
+        if (p.type === 0) {
+          const stage = f < .28 ? 0 : f < .56 ? 1 : f < .82 ? 2 : 3;
+          if ((stage === 0) !== !!pass) continue;
+          const s = p.size * (f < .12 ? .55 + .45 * f / .12 : 1 - .6 * (f - .12) / .88) * (stage === 3 ? 1.2 : 1), h = s * 2.19 * (1 + Math.min(.6, -p.vy / 250));
+          c.globalAlpha = p.ef * (stage === 3 ? .7 * (1 - f) : 1 - f * .4) * (.82 + .18 * Math.sin(p.age * 31 + p.seed));
+          c.drawImage(SPR.flame[stage], p.x - s / 2, p.y - h * .63, s, h);
+        } else if (pass && (p.type === 1 || (p.type === 4 && (!p.landed || p.life - p.age > 1)))) {
+          const s = p.type === 4 ? p.size * 1.3 : p.size * 2.2;
+          c.globalAlpha = p.type === 4 ? (p.landed ? .3 : .5) * (.75 + .25 * Math.sin(p.age * 13 + p.seed)) : p.ef * (Math.sin(p.age * 24 + p.seed) > -.4 ? 1 : .25) * (1 - f);
+          c.drawImage(p.type === 4 ? SPR.glow : SPR.spark, p.x - s / 2, p.y - s / 2, s, s);
+        }
+      }
+    }
+    c.globalCompositeOperation = 'source-over'; c.globalAlpha = 1; act.globalAlpha = 1;
+    if (x1 > x0) F.dirty = [Math.max(0, Math.floor(x0)), Math.max(0, Math.floor(y0)), Math.ceil(x1), Math.ceil(y1)];
+    // smouldering ember spots on charred branches
+    c.globalCompositeOperation = 'lighter';
+    for (const e of F.live) if (e.kind === 0 && e.embers.length) {
+      const a = clock - e.t; if (a < e.flame * .8 || a > e.sm) continue;
+      const fade = 1 - (a - e.flame * .8) / (e.sm - e.flame * .8);
+      for (const [fpos, ph] of e.embers) {
+        const fl = .5 + .5 * Math.sin(clock * 5 + ph) * Math.sin(clock * 2.3 + ph * 2), s = 4 + e.wc * .9;
+        c.globalAlpha = fade * (.35 + .5 * fl);
+        c.drawImage(SPR.spark, e.x0 + (e.x1 - e.x0) * fpos - s / 2, e.y0 + (e.y1 - e.y0) * fpos - s / 2, s, s);
+      }
+    }
+    c.globalCompositeOperation = 'source-over'; c.globalAlpha = 1;
+    // finished?
+    if (F.ptr >= F.els.length && !F.live.length && !P.length && !F.dirty) {
+      staticRedraw(tr); F.done = true;
+      F.act.canvas.remove(); F.cv.remove();               // steady state: only the re-baked static canvas remains
+      if (!F.rootsDone) { F.rootsDone = true; if (F.trunk.state === 2) charRoots(tr); }
+      return false;
+    }
+    if (F.ptr >= F.els.length || F.live.length || P.length) return true;
+    return true;
+  }
+  // ---- ground / wind layer: burning grass & bushes and wind-borne embers (one shared low-res canvas, only while active)
+  const G = { cv: null, ctx: null, parts: [], plants: [], top: 0, bot: 0, cnt: [0, 0, 0, 0, 0, 0, 0] };
+  const GCAP = [140, 50, 50, 70, 0, 0, 70];
+  function gCanvas(){
+    if (G.cv && G.cv.isConnected) return;
+    G.top = Math.max(0, Math.floor(Math.min(...trees.map(t => t.top), groundY - 200) - 120)); G.bot = Math.min(H, Math.ceil(groundY + 50));
+    const c = mkCanvas(W * FS, (G.bot - G.top) * FS); c.className = 'firecv';
+    Object.assign(c.style, { position: 'absolute', left: '0px', top: G.top + 'px', width: W + 'px', height: (G.bot - G.top) + 'px', pointerEvents: 'none' });
+    stage.appendChild(c); G.cv = c; G.ctx = c.getContext('2d');
+  }
+  function gSpawn(type, x, y, size, life, vx, vy){
+    if (G.cnt[type] >= GCAP[type] * budget) return null;
+    if (!SPR) SPR = sprites();
+    gCanvas(); G.cnt[type]++;
+    const p = pool.pop() || {};
+    p.type = type; p.x = x; p.y = y; p.size = size; p.life = life; p.age = 0; p.vx = vx; p.vy = vy; p.seed = Math.random() * 100; p.chk = 0; p.img = null; p.landed = false;
+    G.parts.push(p); return p;
+  }
+  function emEmbers(src, dt, wind, glow, ptOf){
+    let n = (5 + 16 * Math.min(1, glow * 2)) * Math.min(1, Math.abs(wind) * 1.4) * Math.max(.5, budget) * dt;
+    while (n > 0) { if (n >= 1 || Math.random() < n) { const [x, y] = ptOf(src[Math.random() * src.length | 0]); gSpawn(6, x, y, rand(4, 7), rand(3.5, 6), wind * rand(200, 360), rand(-120, -30)); } n--; }
+  }
+  function igniteP(p, delay){
+    if (p.state !== 0) return;
+    if (!SPR) SPR = sprites();
+    const rain = Weather.rainLevel();
+    if (rain > .3 && Math.random() < .85) { gSpawn(3, p.x, groundY - p.h * .5, rand(24, 34), rand(1.5, 2.5), 0, rand(-70, -40)); return; }   // too wet: fizzles
+    p.state = 1; p.t = clock + delay; p.dur = p.kind === 'g' ? rand(1.3, 2.1) : rand(3, 4.5); p.spread = false;
+    p.el.classList.remove('sw'); p.el.getAnimations().forEach(a => a.cancel());
+    G.plants.push(p); gCanvas(); Weather.fire(true); run();
+  }
+  function stepG(dt){
+    const c = G.ctx, wind = Weather.wind(), rain = Weather.rainLevel(), soak = clamp01((rain - .15) / .3);
+    G.cnt = [0, 0, 0, 0, 0, 0, 0]; for (const p of G.parts) G.cnt[p.type]++;
+    const em = (rate, fn) => { let n = rate * dt; while (n > 0) { if (n >= 1 || Math.random() < n) fn(); n--; } };
+    // burning plants
+    for (let i = G.plants.length - 1; i >= 0; i--) {
+      const p = G.plants[i], a = clock - p.t;
+      if (a < 0) continue;
+      if (soak > .3 && !p.wet) { p.wet = true; p.dur = Math.min(p.dur, a + rand(.4, 1.2)); gSpawn(3, p.x, groundY - p.h * .6, rand(28, 40), rand(2.2, 3.4), wind * 50, rand(-90, -60)); }
+      const u = clamp01(a / (p.dur * .75)), I = a < .25 ? a / .25 : a < p.dur ? 1 : Math.max(0, 1 - (a - p.dur) / .6);
+      if (p.u !== u) {                                   // crossfade the plant's own small canvas to its charred version
+        const x = p.ctx; x.setTransform(1, 0, 0, 1, 0, 0); x.clearRect(0, 0, p.cv.width, p.cv.height);
+        if (p.flip) { x.translate(p.cv.width, 0); x.scale(-1, 1); }
+        if (u < 1) { x.globalAlpha = 1 - u; x.drawImage(p.img, 0, 0, p.cv.width, p.cv.height); }
+        x.globalAlpha = u; x.drawImage(p.bimg, 0, 0, p.cv.width, p.cv.height);
+        if (u > 0 && u < 1) { x.globalCompositeOperation = 'source-atop'; x.globalAlpha = Math.sin(Math.PI * u) * .5; x.fillStyle = '#ff6a1a'; x.fillRect(0, 0, p.cv.width, p.cv.height); x.globalCompositeOperation = 'source-over'; }
+        x.globalAlpha = 1; p.u = u;
+      }
+      const pt = () => [p.x + rand(-.42, .42) * p.w, groundY - p.h * rand(.1, .85)];
+      if (I > 0) {
+        em((p.kind === 'g' ? 14 : 20) * I * budget * (1 - .7 * soak), () => { const [x, y] = pt(); gSpawn(0, x, y, (p.kind === 'g' ? rand(10, 16) : rand(14, 22)) * (1 - .4 * Math.min(1, rain)), rand(.35, .75), wind * 60, rand(-70, -30)); });
+        em(1.2 * I * budget, () => { const [x, y] = pt(); gSpawn(1, x, y, rand(2.5, 4), rand(.8, 1.8), rand(-30, 30) + wind * 80, rand(-120, -50)); });
+        em(1.2 * I * budget, () => { const [x, y] = pt(); gSpawn(2, x, y - 10, rand(16, 26), rand(3, 5), wind * 40, rand(-60, -40)); });
+        if (rain > .15) em(6 * rain * I, () => { const [x, y] = pt(); gSpawn(3, x, y - 6, rand(24, 36), rand(2.5, 3.5), wind * 50, rand(-100, -70)); });
+        if (Math.abs(wind) > .25 && rain < .2) emEmbers([p], dt, wind, .4 * I, () => pt());
+      }
+      if (!p.spread && a > p.dur * .35 && soak < .3) {   // creeps to the next tuft / bush / trunk
+        p.spread = true;
+        const reach = (p.kind === 'g' ? 45 : 70) * (1 + .8 * Math.abs(wind));
+        for (const q of plants) if (q !== p && q.state === 0 && Math.abs(q.x - p.x) < (q.w + p.w) / 2 + reach && Math.random() < .8) igniteP(q, rand(.2, 1) / (1 + Math.abs(wind)));
+        for (const tr of trees) if (Math.abs(tr.x - p.x) < p.w / 2 + tr.w0 + 30 && Math.random() < .7) {
+          const b = tr.branches[0], [x, y] = screenOf(tr, b.x + Math.sin(b.ang) * b.len * .1, b.y - Math.cos(b.ang) * b.len * .1); ignite(tr, x, y);
+        }
+      }
+      if (a > p.dur + .7) { p.state = 2; G.plants.splice(i, 1); }
+    }
+    // particles
+    c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, c.canvas.width, c.canvas.height);
+    c.setTransform(FS, 0, 0, FS, 0, -G.top * FS);
+    const P = G.parts;
+    for (let i = P.length - 1; i >= 0; i--) {
+      const p = P[i]; p.age += dt;
+      if (p.type === 6 && rain > .2) p.life = Math.min(p.life, p.age + .25);          // rain kills embers
+      if (p.age >= p.life || p.y < G.top - 20 || p.x < -40 || p.x > W + 40) { P[i] = P[P.length - 1]; P.pop(); pool.push(p); continue; }
+      const f = p.age / p.life; p.ef = clamp01((p.y - G.top - 10) / 90);
+      if (p.type === 0) { p.vy -= 45 * dt; p.vx += (wind * 110 - p.vx) * dt * 2; p.x += p.vx * dt + Math.sin(p.age * 9 + p.seed) * 22 * dt; p.y += p.vy * dt; }
+      else if (p.type === 1) { p.vy -= 15 * dt; p.vx += ((Math.random() - .5) * 260 + (wind * 90 - p.vx) * 2) * dt; p.x += p.vx * dt; p.y += p.vy * dt; }
+      else if (p.type === 2 || p.type === 3) { p.vx += (wind * 70 - p.vx) * dt * .8; p.x += (p.vx + Math.sin(p.age * 1.3 + p.seed) * 8) * dt; p.y += p.vy * dt; }
+      else if (p.type === 6) {                         // ember: carried by the wind, sinks slowly, may set things alight
+        p.vx += (Math.sign(wind) * Math.max(.35, Math.abs(wind)) * 380 - p.vx) * dt * 1.2 + (Math.random() - .5) * 120 * dt; p.vy += (28 + Math.sin(p.age * 4 + p.seed) * 60) * dt; p.vy *= 1 - dt * .6;
+        p.x += p.vx * dt; p.y += p.vy * dt;
+        if ((p.chk -= dt) <= 0) {
+          p.chk = .12;
+          let hit = false;
+          if (p.y > groundY - 80) for (const q of plants) if (q.state === 0 && Math.abs(p.x - q.x) < q.w * .45 && p.y > groundY - q.h * .85) { if (Math.random() < .5) igniteP(q, 0); hit = true; break; }
+          if (!hit) for (const tr of trees) {
+            if ((!tr.swaying && !tr.fire) || (tr.fire && tr.fire.done)) continue;
+            if (hitOne(tr, p.x, p.y)) { hit = true; if (Math.random() < .3) ignite(tr, p.x, p.y); break; }
+          }
+          if (hit && Math.random() < .5) p.life = p.age;     // ember spent
+        }
+        if (p.y >= groundY - 2) { p.y = groundY - 2; p.vx *= .3; p.vy = 0; p.life = Math.min(p.life, p.age + .6); }
+      }
+      if (p.type === 2) { const s = p.size * (1 + 2.6 * f); c.globalAlpha = .32 * p.ef * Math.sin(Math.PI * f) ** .7; c.drawImage(SPR.smoke, p.x - s / 2, p.y - s / 2, s, s); }
+      else if (p.type === 3) { const s = p.size * (1 + 2.4 * f); c.globalAlpha = .8 * p.ef * Math.sin(Math.PI * Math.min(1, f * 1.25 + .1)) ** .8; c.drawImage(SPR.steam, p.x - s / 2, p.y - s / 2, s, s); }
+    }
+    for (const pass of [0, 1]) {
+      c.globalCompositeOperation = pass ? 'lighter' : 'source-over';
+      for (const p of P) {
+        const f = p.age / p.life;
+        if (p.type === 0) {
+          const stage = f < .28 ? 0 : f < .56 ? 1 : f < .82 ? 2 : 3;
+          if ((stage === 0) !== !!pass) continue;
+          const s = p.size * (f < .12 ? .55 + .45 * f / .12 : 1 - .6 * (f - .12) / .88) * (stage === 3 ? 1.2 : 1), h = s * 2.19 * (1 + Math.min(.6, -p.vy / 250));
+          c.globalAlpha = p.ef * (stage === 3 ? .7 * (1 - f) : 1 - f * .4) * (.82 + .18 * Math.sin(p.age * 31 + p.seed));
+          c.drawImage(SPR.flame[stage], p.x - s / 2, p.y - h * .63, s, h);
+        } else if (p.type === 6 && !pass) {             // dark glowing flake under the glow
+          c.globalAlpha = .8 * (1 - f * f); c.fillStyle = '#3a2418'; c.fillRect(p.x - 1, p.y - 1, 2.2, 2.2);
+        } else if (pass && (p.type === 1 || p.type === 6)) {
+          const s = p.type === 6 ? p.size * 2.4 : p.size * 2.2;
+          c.globalAlpha = p.ef * (Math.sin(p.age * (p.type === 6 ? 11 : 24) + p.seed) > -.4 ? 1 : .35) * (1 - f * f);
+          c.drawImage(SPR.spark, p.x - s / 2, p.y - s / 2, s, s);
+        }
+      }
+    }
+    c.globalCompositeOperation = 'source-over'; c.globalAlpha = 1;
+    if (!P.length && !G.plants.length) { G.cv.remove(); G.cv = null; return false; }
+    return true;
+  }
+  const gActive = () => !!(G.cv && (G.parts.length || G.plants.length));
+
+  function tick(ms){
+    raf = -1;                                          // 'in a frame': ignitions from inside step() must not start a second loop
+
+    const dt = Math.max(0, Math.min(.05, (ms - last) / 1000)); last = ms; clock += dt;
+    // adaptive particle budget from the measured frame rate
+    fpsN++; if (!fpsT) fpsT = ms;
+    if (ms - fpsT > 1000) { const fps = fpsN * 1000 / (ms - fpsT); budget = fps < 45 ? Math.max(.35, budget * Math.max(.6, fps / 55)) : fps > 56 ? Math.min(1, budget * 1.1) : budget; fpsN = 0; fpsT = ms; }
+    for (let i = burning.length - 1; i >= 0; i--) {
+      const tr = burning[i];
+      if (!tr.fire || !tr.el.isConnected) { burning.splice(i, 1); continue; }
+      if (!step(tr, dt)) {
+        burning.splice(i, 1);
+        if (!tr.fire.act.canvas.isConnected) { /* finalised */ }
+      }
+    }
+    if (G.cv) stepG(dt);
+    raf = 0;
+    if (burning.length || gActive()) raf = requestAnimationFrame(tick); else Weather.fire(false);
+  }
+  function run(){ if (!raf && !document.hidden) { last = performance.now(); fpsT = 0; fpsN = 0; raf = requestAnimationFrame(tick); } }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && (burning.length || gActive())) run(); });
+  function reset(){ if (raf > 0) cancelAnimationFrame(raf); raf = 0; burning = []; leafBCache.clear(); G.parts.length = 0; G.plants = []; G.cv = null; }
+  return { click, igniteAll, ignite, igniteP, reset, hitTree, stats: () => ({ embers: G.parts.filter(p => p.type === 6).length, plantsBurning: G.plants.length, plantsBurnt: plants.filter(p => p.state === 2).length, burning: burning.length, budget, rain: +Weather.rainLevel().toFixed(2), parts: trees.reduce((n, t) => n + (t.fire ? t.fire.parts.length : 0), 0), byType: trees.reduce((a, t) => (t.fire && t.fire.parts.forEach(p => a[p.type]++), a), [0, 0, 0, 0, 0, 0]) }) };
+})();
+
+window.__tree = { get trees(){ return trees; }, get plants(){ return plants; }, get DPR(){ return DPR; }, Fire };   // handle for tests / console
+function resume(){ if (!running && !document.hidden && FREEZE == null) { running = true; rafId = requestAnimationFrame(frame); } }
+document.addEventListener('visibilitychange', resume);
+
+function restart(newSeed){
+  if (newSeed) seed = (Math.random() * 1e9) | 0;
+  cancelAnimationFrame(rafId); clearTimeout(hintTimer);
+  hint.classList.remove('on');
+  Fire.reset(); build(); Weather.attach(); t0 = performance.now(); running = true;
+  rafId = requestAnimationFrame(frame);
+}
+
+Promise.all([Promise.all(STICKS.map(load)), Promise.all(LEAVES.map(load)), Promise.all(ROOTS.map(load)), Promise.all(CLODS.map(load)),
+             Promise.all(DIRT.map(load)), load('assets/concrete.png'),
+             Promise.all(BURNT(STICKS).map(load)), Promise.all(BURNT(LEAVES).map(load)), Promise.all(BURNT(ROOTS).map(load)),
+             Promise.all(PLANTS.map(load)), Promise.all(BURNT(PLANTS).map(load))]).then(([st, lv, ro, cl, di, con, bst, blv, bro, pl, bpl]) => {
+  IMG.grass = []; IMG.bush = [];
+  PLANTS.forEach((path, i) => pl[i] && (path.includes('/grass_') ? IMG.grass : IMG.bush).push({ n: pl[i], b: bpl[i] || pl[i] }));
+  IMG.burnt = new Map();
+  st.forEach((im, i) => im && IMG.burnt.set(im, bst[i] || im)); ro.forEach((im, i) => im && IMG.burnt.set(im, bro[i] || im));
+  IMG.burntLeaves = lv.map((im, i) => blv[i] || im);
+  st = st.filter(Boolean);
+  IMG.thick = st.filter(i => i.width / i.height > .17); IMG.thin = st.filter(i => i.width / i.height <= .17);
+  if (!IMG.thick.length) IMG.thick = st; if (!IMG.thin.length) IMG.thin = st;
+  IMG.roots = ro; IMG.clods = cl.filter(Boolean); IMG.dirt = di; IMG.concrete = con;
+  leafTints = lv.map(bakeLeafTints);
+  restart(false);
+  stage.addEventListener('click', e => { if (!Fire.click(e.clientX, e.clientY)) restart(true); });
+  addEventListener('keydown', e => { if (!e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'f') Fire.igniteAll(); });
+  addEventListener('keydown', e => { if (!e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'z') restart(true); });
+  let rt, lastW = innerWidth, lastH = innerHeight;
+  addEventListener('resize', () => {
+    clearTimeout(rt);
+    rt = setTimeout(() => {
+      // ignore tiny height changes (mobile URL bar), rebuild on real size changes
+      if (innerWidth === lastW && Math.abs(innerHeight - lastH) < lastH * .15) return;
+      lastW = innerWidth; lastH = innerHeight; restart(false);
+    }, 250);
+  });
+});
+})();
+</script>
+</body>
+</html>
